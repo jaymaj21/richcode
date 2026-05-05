@@ -1,0 +1,48 @@
+{
+  "name": "spectralweb-vscode",
+  "displayName": "Spectral Web Rich Editor",
+  "description": "VS Code custom editor that persists Spectral-style #editor HTML beside the source file.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:spectralweb.openRichEditor",
+    "onCommand:spectralweb.saveRichLayer",
+    "onCustomEditor:spectralweb.richEditor"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "spectralweb.openRichEditor",
+        "title": "Spectral Web: Open Rich Editor"
+      },
+      {
+        "command": "spectralweb.saveRichLayer",
+        "title": "Spectral Web: Save Rich HTML Layer"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "spectralweb.richEditor",
+        "displayName": "Spectral Web Rich Editor",
+        "selector": [
+          {
+            "filenamePattern": "*"
+          }
+        ],
+        "priority": "option"
+      }
+    ]
+  },
+  "scripts": {
+    "lint": "node --check extension.js && node --check media/editor.js && node --check lib/spectralwebCore.js && node --check test/run-tests.js",
+    "test": "node test/run-tests.js"
+  },
+  "devDependencies": {}
+}
