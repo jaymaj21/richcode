@@ -542,6 +542,7 @@
             clearhl: () => clearAllHighlight(),
             mdrender: () => renderMarkdown(),
             tomd: () => copyMarkdownToClipboard(),
+            reflow: () => showReflowPopup(),
             insertmedia: () => insertMediaFileAtSavedRange(),
             media: () => insertMediaFileAtSavedRange()
         };
@@ -2577,6 +2578,15 @@
             }
             reflowSelection(maxColumn);
         }, 'Reflow selected text to column:', '72');
+    }
+
+    function reflow(maxColumn) {
+        const column = Number.parseInt(maxColumn, 10);
+        if (!Number.isFinite(column) || column < 1) {
+            showReflowPopup();
+            return;
+        }
+        reflowSelection(column);
     }
 
     function reflowSelection(maxColumn) {
