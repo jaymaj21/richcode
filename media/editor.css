@@ -218,6 +218,71 @@ label {
     background-color: #ffffff;
 }
 
+.block-color-highlight {
+    background-color: #ffeeaa;
+}
+
+.diff-notes-picking .note-button {
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
+}
+
+.diff-notes-popup {
+    display: none;
+    position: fixed;
+    inset: 48px;
+    background: #ffffff;
+    color: #111111;
+    border: 1px solid var(--vscode-panel-border, #777777);
+    box-shadow: 0 2px 18px rgba(0, 0, 0, 0.35);
+    z-index: 1003;
+}
+
+.diff-notes-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    border-bottom: 1px solid #dddddd;
+    background: #f7f7f7;
+}
+
+.diff-notes-header div {
+    display: flex;
+    gap: 6px;
+}
+
+.diff-notes-body {
+    box-sizing: border-box;
+    height: calc(100% - 46px);
+    margin: 0;
+    padding: 10px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 13px;
+}
+
+.diff-notes-add {
+    background: #d7ffd7;
+}
+
+.diff-notes-del {
+    background: #ffd7d7;
+    text-decoration: line-through;
+}
+
+.diff-notes-break {
+    display: block;
+    color: #666666;
+    background: #eeeeee;
+}
+
+.diff-notes-same {
+    background: transparent;
+}
+
 .cursor {
     display: inline-block;
     width: 1px;
@@ -447,6 +512,26 @@ abbrev {
     font-family: "Courier New", Courier, monospace;
     font-size: 13px;
     line-height: 1.45;
+}
+
+.help-popup-body h3 {
+    margin: 14px 0 6px;
+}
+
+.help-popup-body table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.help-popup-body td {
+    border-top: 1px solid #eeeeee;
+    padding: 5px 6px;
+    vertical-align: top;
+}
+
+.help-popup-body code {
+    font-family: "Courier New", Courier, monospace;
 }
 
 .search-results-popup {

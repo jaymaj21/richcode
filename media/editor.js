@@ -41,6 +41,11 @@
     let searchResultsTitle = null;
     let searchResultsList = null;
     let speechRunId = 0;
+    let diffNotesPopup = null;
+    let diffNotesBody = null;
+    let diffNotesGranularity = null;
+    let diffNotesPickState = null;
+    let diffContext = null;
     const jsCommandHistory = [];
     let jsCommandHistoryIndex = -1;
 
@@ -306,7 +311,13 @@
     editor.addEventListener('dblclick', handleEditorDoubleClick);
 
     document.addEventListener('keydown', event => {
-        if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's') {
+        if (event.key === 'Escape' && diffNotesPickState) {
+            event.preventDefault();
+            cancelDiffNotesMode('diffnotes: note selection cancelled.');
+        } else if (event.key === 'F7') {
+            event.preventDefault();
+            diffnotes();
+        } else if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's') {
             event.preventDefault();
             window.clearTimeout(sendTimer);
             vscode.postMessage({
@@ -544,7 +555,11 @@
             tomd: () => copyMarkdownToClipboard(),
             reflow: () => showReflowPopup(),
             insertmedia: () => insertMediaFileAtSavedRange(),
-            media: () => insertMediaFileAtSavedRange()
+            media: () => insertMediaFileAtSavedRange(),
+            cmdhelp: () => cmdhelp(),
+            delete_empty_lines: () => delete_empty_lines(),
+            block_color: () => block_color(),
+            nested_block_color: () => nested_block_color()
         };
         if (Object.prototype.hasOwnProperty.call(aliases, normalizedCommand)) {
             return aliases[normalizedCommand]();
@@ -1859,6 +1874,61 @@
         helpPopup.style.display = 'block';
     }
 
+    function commandHelpSections() {
+        return [
+            {
+                title: 'Core',
+                commands: [
+                    ['cmdhelp()', 'Show this command reference.'],
+                    ['clear()', 'Clear temporary highlights.'],
+                    ['reflow(60)', 'Rewrap selected text near the requested column.'],
+                    ['delete_empty_lines()', 'Delete whitespace-only editor lines.']
+                ]
+            },
+            {
+                title: 'Notes',
+                commands: [
+                    ['diffnotes()', 'Click two note buttons and compare their contents. F7 starts the same mode.'],
+                    ['diffnotes({ granularity: "word" })', 'Compare notes by word; use "line", "word", or "char".'],
+                    ['setDiffContext(2, 2)', 'Show changed lines plus context in line note diffs.'],
+                    ['clearDiffContext()', 'Clear line-diff context.']
+                ]
+            },
+            {
+                title: 'Brace Blocks',
+                commands: [
+                    ['block_color(3, ["TODO"])', 'Color top-level brace blocks whose text matches every regex.'],
+                    ['block_color("sel", ["TODO", "-done"])', 'Select matching brace blocks; prefix string regexes with - to negate them.'],
+                    ['nested_block_color(1, 2, ["if", "return"])', 'Color matching brace blocks at nesting level 1.'],
+                    ['nested_block_color(2, "#ccffdd", ["case"], 10, 80)', 'Only scan lines 10 through 80 for level-2 brace blocks.']
+                ]
+            },
+            {
+                title: 'Text',
+                commands: [
+                    ['uc, lc, tc', 'Uppercase, lowercase, or titlecase selected text.'],
+                    ['camel, snake, kebab', 'Convert selected text case.'],
+                    ['mdrender()', 'Render Markdown in the editor.'],
+                    ['incrint("-?\\\\d+", 1)', 'Increment integers inside regex matches.']
+                ]
+            }
+        ];
+    }
+
+    function renderCommandHelpHtml() {
+        return commandHelpSections().map(section => {
+            const rows = section.commands.map(([command, description]) =>
+                `<tr><td><code>${escapeHtml(command)}</code></td><td>${escapeHtml(description)}</td></tr>`).join('');
+            return `<h3>${escapeHtml(section.title)}</h3><table>${rows}</table>`;
+        }).join('');
+    }
+
+    function cmdhelp() {
+        ensureHelpPopup();
+        helpPopup.querySelector('.help-popup-body').innerHTML = renderCommandHelpHtml();
+        helpPopup.style.display = 'block';
+    }
+
     function ensureHelpPopup() {
         if (helpPopup) {
             return;
@@ -1878,17 +1948,20 @@
         header.appendChild(title);
         header.appendChild(closeButton);
 
-        const body = document.createElement('pre');
-        body.textContent = [
+        const body = document.createElement('div');
+        body.className = 'help-popup-body';
+        body.innerHTML = `<pre>${escapeHtml([
             'Ctrl+S            Save source and companion HTML layer',
             'Ctrl+i            Insert HTML / convert selected literal HTML',
             'Ctrl+m            Insert note',
             'Ctrl+q            Open JS command popup',
+            'F7                Diff two note buttons',
             'Ctrl+l            Record audio into the editor',
             'Ctrl+b            Toggle all toolbars',
             'Render MD         Convert editor Markdown into rich HTML',
             'Copy MD           Copy selection/editor as Markdown',
             'JS Cmd            Run JavaScript command in webview',
+            'cmdhelp           Show command reference',
             'Incr Int          Increment integers inside regex matches',
             'Ctrl+1..7         Send selection to regex search box',
             'Ctrl+Alt+1        Add explanation around selection',
@@ -1909,7 +1982,7 @@
             'Yank/DD Lines     Copy or copy-delete current line',
             'Tab / Shift+Tab   Indent / unindent',
             'Enter             Smart return indentation'
-        ].join('\n');
+        ].join('\n'))}</pre>`;
 
         helpPopup.appendChild(header);
         helpPopup.appendChild(body);
@@ -3360,6 +3433,164 @@
             /<tspan\b[^>]*data-spectral-svg-hl\b/i.test(value);
     }
 
+    function blockColorResolveColor(colorSpec) {
+        const spec = String(colorSpec == null ? '' : colorSpec).trim();
+        const fixed = {
+            1: '#f0f583',
+            2: '#fd9f9f',
+            3: '#aafba2',
+            4: '#a5f8f8',
+            5: '#f997f9',
+            7: '#ffffff'
+        };
+        if (/^\d+$/.test(spec)) {
+            const n = Number.parseInt(spec, 10);
+            if (n === 6) {
+                return document.getElementById('colorChooser')?.value || '#ccddf7';
+            }
+            if (fixed[n]) return fixed[n];
+        }
+        return spec || '#ccddf7';
+    }
+
+    function blockColorRegexes(regexes) {
+        const list = Array.isArray(regexes) ? regexes : [regexes];
+        return list
+            .filter(item => item != null && String(item).length > 0)
+            .map(item => {
+                if (item instanceof RegExp) return { regex: item, negate: false };
+                let pattern = String(item);
+                let negate = false;
+                if (pattern.startsWith('-')) {
+                    if (pattern.startsWith('--')) {
+                        pattern = pattern.slice(1);
+                    } else {
+                        negate = true;
+                        pattern = pattern.slice(1);
+                    }
+                }
+                return { regex: new RegExp(pattern, 'm'), negate };
+            });
+    }
+
+    function blockColorMatches(text, regexes) {
+        return regexes.every(({ regex, negate }) => {
+            regex.lastIndex = 0;
+            const matched = regex.test(text);
+            return negate ? !matched : matched;
+        });
+    }
+
+    function blockColorLineOffsets(text, startLineNum = 1, endLineNum = 'end') {
+        const lineStarts = [0];
+        for (let i = 0; i < text.length; i += 1) {
+            if (text[i] === '\n') lineStarts.push(i + 1);
+        }
+        const startLine = Math.max(1, Number.parseInt(startLineNum, 10) || 1);
+        const start = lineStarts[Math.min(startLine - 1, lineStarts.length - 1)] ?? text.length;
+        if (endLineNum === 'end' || endLineNum == null) {
+            return { start, stop: text.length };
+        }
+        const endLine = Math.max(startLine, Number.parseInt(endLineNum, 10) || startLine);
+        return { start, stop: lineStarts[endLine] == null ? text.length : lineStarts[endLine] };
+    }
+
+    function findBraceBlocksAtLevel(text, level, start, stop) {
+        let depth = 0;
+        let blockStart = null;
+        const blocks = [];
+        for (let pos = start; pos < stop; pos += 1) {
+            const ch = text[pos];
+            if (ch === '{') {
+                if (depth === level) blockStart = pos;
+                depth += 1;
+            } else if (ch === '}') {
+                if (depth > 0) {
+                    const closingLevel = depth - 1;
+                    depth -= 1;
+                    if (closingLevel === level && blockStart != null) {
+                        blocks.push({ start: blockStart, end: pos + 1, text: text.slice(blockStart, pos + 1) });
+                        blockStart = null;
+                    }
+                }
+            }
+        }
+        return blocks;
+    }
+
+    function rangeForPlainOffsets(startOffset, endOffset) {
+        const start = getTextPositionForPlainOffset(startOffset);
+        const end = getTextPositionForPlainOffset(endOffset);
+        if (!start || !end) return null;
+        const range = document.createRange();
+        range.setStart(start.node, start.offset);
+        range.setEnd(end.node, end.offset);
+        return range;
+    }
+
+    function applyBlockColorRanges(ranges, color, level) {
+        if (color === 'sel') {
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            ranges.forEach(rangeInfo => {
+                const range = rangeForPlainOffsets(rangeInfo.start, rangeInfo.end);
+                if (range) selection.addRange(range);
+            });
+            if (selection.rangeCount) {
+                savedEditorRange = selection.getRangeAt(selection.rangeCount - 1).cloneRange();
+            }
+            return;
+        }
+
+        ranges.slice().reverse().forEach(rangeInfo => {
+            const range = rangeForPlainOffsets(rangeInfo.start, rangeInfo.end);
+            if (!range || range.collapsed) return;
+            const span = document.createElement('span');
+            span.className = 'block-color-highlight';
+            span.style.backgroundColor = color;
+            span.dataset.blockColorLevel = String(level);
+            try {
+                range.surroundContents(span);
+            } catch (_) {
+                const fragment = range.extractContents();
+                span.appendChild(fragment);
+                range.insertNode(span);
+            }
+        });
+    }
+
+    function nested_block_color(level = 0, colorSpec = 1, regexes = [], startLineNum = 1, endLineNum = 'end') {
+        const parsedLevel = Number.parseInt(level, 10);
+        if (!Number.isInteger(parsedLevel) || parsedLevel < 0) {
+            throw new Error('nested_block_color level must be a non-negative integer');
+        }
+        let compiledRegexes;
+        try {
+            compiledRegexes = blockColorRegexes(regexes);
+        } catch (error) {
+            setStatus(`nested_block_color: invalid regex: ${error.message}`);
+            return 0;
+        }
+        const text = getPlainTextForIndexing();
+        const { start, stop } = blockColorLineOffsets(text, startLineNum, endLineNum);
+        const blocks = findBraceBlocksAtLevel(text, parsedLevel, start, stop);
+        const matches = compiledRegexes.length === 0
+            ? blocks
+            : blocks.filter(block => blockColorMatches(block.text, compiledRegexes));
+        const color = String(colorSpec).trim() === 'sel' ? 'sel' : blockColorResolveColor(colorSpec);
+        applyBlockColorRanges(matches, color, parsedLevel);
+        if (color !== 'sel') {
+            hydrateEditorControls(editor);
+            scheduleSend();
+        }
+        setStatus(`nested_block_color: ${color === 'sel' ? 'selected' : 'colored'} ${matches.length} block(s) at level ${parsedLevel}.`);
+        return matches.length;
+    }
+
+    function block_color(colorSpec = 1, regexes = [], startLineNum = 1, endLineNum = 'end') {
+        return nested_block_color(0, colorSpec, regexes, startLineNum, endLineNum);
+    }
+
     function createCollapsedRange(node, offset) {
         const range = document.createRange();
         range.setStart(node, Math.max(0, Math.min(offset, node.textContent.length)));
@@ -3378,7 +3609,8 @@
             '.highlight4',
             '.highlight5',
             '.highlight6',
-            '.highlight7'
+            '.highlight7',
+            '.block-color-highlight'
         ];
         let removed = 0;
 
@@ -3495,8 +3727,23 @@
         [startOffset, matchOffset].sort((a, b) => b - a).forEach(offset => {
             highlightCharacterAtOffset(offset, color);
         });
+        selectFlatTextRange(Math.min(startOffset, matchOffset) + 1, Math.max(startOffset, matchOffset));
         setStatus(`Matched ${char} with ${matchChar}.`);
         scheduleSend();
+    }
+
+    function selectFlatTextRange(startOffset, endOffset) {
+        const start = getTextPositionForOffset(startOffset);
+        const end = getTextPositionForOffset(endOffset);
+        if (!start || !end) return false;
+        const range = document.createRange();
+        range.setStart(start.node, start.offset);
+        range.setEnd(end.node, end.offset);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        savedEditorRange = range.cloneRange();
+        return true;
     }
 
     function highlightCharacterAtOffset(offset, color) {
@@ -3693,6 +3940,10 @@
     function noteButtonClickHandler(event) {
         event.preventDefault();
         event.stopPropagation();
+        if (diffNotesPickState) {
+            handleDiffNotesPickClick(event);
+            return;
+        }
         showNoteEditPopup(event.currentTarget || event.target);
     }
 
@@ -3704,6 +3955,252 @@
         button.textContent = label || '';
         button.addEventListener('click', noteButtonClickHandler);
         insertNodeAtSelection(button);
+    }
+
+    function getNoteButtonFromTarget(target) {
+        return target && target.closest ? target.closest('.note-button') : null;
+    }
+
+    function getDiffNoteText(noteRef) {
+        const button = noteRef && noteRef.nodeType ? getNoteButtonFromTarget(noteRef) : null;
+        if (button) {
+            return base64DecodeUtf8(button.getAttribute('data-message') || button.dataset.message || '');
+        }
+        return typeof noteRef === 'string' ? noteRef : '';
+    }
+
+    function normalizedDiffOptions(opts = {}) {
+        if (typeof opts === 'string') {
+            return { granularity: opts };
+        }
+        return opts && typeof opts === 'object' ? opts : {};
+    }
+
+    function normalizeDiffTextInput(text, opts = {}) {
+        let value = String(text || '')
+            .replace(/\r\n|\r/g, '\n')
+            .replace(/^\uFEFF/, '')
+            .replace(/\u00A0/g, ' ')
+            .normalize('NFC');
+        if (opts.ignoreTrailingWhitespace !== false) {
+            value = value.split('\n').map(line => line.replace(/[ \t]+$/g, '')).join('\n');
+        }
+        return value;
+    }
+
+    function tokeniseDiffText(text, granularity, opts = {}) {
+        const normalized = normalizeDiffTextInput(text, opts);
+        if (granularity === 'char') {
+            return Array.from(normalized).map(value => ({ text: value, key: value }));
+        }
+        if (granularity === 'word') {
+            return (normalized.match(/\s+|[^\s]+/g) || []).map(value => ({ text: value, key: value }));
+        }
+        return normalized.split('\n').map((line, index, lines) => ({
+            text: index < lines.length - 1 ? `${line}\n` : line,
+            key: line
+        }));
+    }
+
+    function lcsDiffTokens(aTokens, bTokens) {
+        const n = aTokens.length;
+        const m = bTokens.length;
+        const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
+        for (let i = n - 1; i >= 0; i -= 1) {
+            for (let j = m - 1; j >= 0; j -= 1) {
+                dp[i][j] = aTokens[i].key === bTokens[j].key
+                    ? dp[i + 1][j + 1] + 1
+                    : Math.max(dp[i + 1][j], dp[i][j + 1]);
+            }
+        }
+        const segments = [];
+        const push = (type, token) => {
+            const last = segments[segments.length - 1];
+            if (last && last.type === type) {
+                last.text += token.text;
+            } else {
+                segments.push({ type, text: token.text });
+            }
+        };
+        let i = 0;
+        let j = 0;
+        while (i < n && j < m) {
+            if (aTokens[i].key === bTokens[j].key) {
+                push('same', aTokens[i]);
+                i += 1;
+                j += 1;
+            } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+                push('del', aTokens[i]);
+                i += 1;
+            } else {
+                push('add', bTokens[j]);
+                j += 1;
+            }
+        }
+        while (i < n) push('del', aTokens[i++]);
+        while (j < m) push('add', bTokens[j++]);
+        return segments;
+    }
+
+    function normaliseDiffContextValue(value) {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+    }
+
+    function setDiffContext(contextBefore, contextAfter = contextBefore) {
+        diffContext = {
+            before: normaliseDiffContextValue(contextBefore),
+            after: normaliseDiffContextValue(contextAfter)
+        };
+        setStatus(`Diff context set to ${diffContext.before} before / ${diffContext.after} after.`);
+        return diffContext;
+    }
+
+    function clearDiffContext() {
+        diffContext = null;
+        setStatus('Diff context cleared.');
+    }
+
+    function splitDiffSegmentsToLines(segments) {
+        const lines = [];
+        segments.forEach(seg => {
+            String(seg.text).split(/(\n)/).forEach(part => {
+                if (part === '') return;
+                if (!lines.length || lines[lines.length - 1].done) {
+                    lines.push({ type: seg.type, text: '', changed: seg.type !== 'same', done: false });
+                }
+                lines[lines.length - 1].text += part;
+                lines[lines.length - 1].changed = lines[lines.length - 1].changed || seg.type !== 'same';
+                if (part === '\n') lines[lines.length - 1].done = true;
+            });
+        });
+        return lines;
+    }
+
+    function applyLineDiffContext(segments, context) {
+        if (!context) return segments;
+        const lines = splitDiffSegmentsToLines(segments);
+        const keep = new Set();
+        lines.forEach((line, index) => {
+            if (!line.changed) return;
+            for (let i = Math.max(0, index - context.before); i <= Math.min(lines.length - 1, index + context.after); i += 1) {
+                keep.add(i);
+            }
+        });
+        const out = [];
+        let lastKept = -2;
+        Array.from(keep).sort((a, b) => a - b).forEach(index => {
+            if (lastKept >= 0 && index > lastKept + 1) {
+                out.push({ type: 'break', text: '---------- context break ----------\n' });
+            }
+            out.push({ type: lines[index].type, text: lines[index].text });
+            lastKept = index;
+        });
+        return out.length ? out : segments;
+    }
+
+    function ensureDiffNotesPopup() {
+        if (diffNotesPopup) return;
+        diffNotesPopup = document.createElement('div');
+        diffNotesPopup.className = 'diff-notes-popup';
+        const header = document.createElement('div');
+        header.className = 'diff-notes-header';
+        const title = document.createElement('strong');
+        title.textContent = 'Note Diff';
+        const controls = document.createElement('div');
+        ['line', 'word', 'char'].forEach(mode => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = mode;
+            button.addEventListener('click', () => {
+                if (diffNotesPopup.dataset.left != null) {
+                    renderDiffNotesPopup(
+                        base64DecodeUtf8(diffNotesPopup.dataset.left),
+                        base64DecodeUtf8(diffNotesPopup.dataset.right),
+                        { granularity: mode }
+                    );
+                }
+            });
+            controls.appendChild(button);
+        });
+        const closeButton = document.createElement('button');
+        closeButton.type = 'button';
+        closeButton.textContent = 'Close';
+        closeButton.addEventListener('click', closeDiffNotesPopup);
+        controls.appendChild(closeButton);
+        header.appendChild(title);
+        header.appendChild(controls);
+        diffNotesBody = document.createElement('pre');
+        diffNotesBody.className = 'diff-notes-body';
+        diffNotesPopup.appendChild(header);
+        diffNotesPopup.appendChild(diffNotesBody);
+        document.body.appendChild(diffNotesPopup);
+    }
+
+    function renderDiffNotesPopup(text1, text2, opts = {}) {
+        const granularity = opts.granularity || 'line';
+        diffNotesGranularity = granularity;
+        ensureDiffNotesPopup();
+        let segments = lcsDiffTokens(
+            tokeniseDiffText(text1, granularity, opts),
+            tokeniseDiffText(text2, granularity, opts)
+        );
+        if (granularity === 'line') {
+            segments = applyLineDiffContext(segments, diffContext);
+        }
+        diffNotesBody.innerHTML = '';
+        segments.forEach(seg => {
+            const span = document.createElement('span');
+            span.className = `diff-notes-${seg.type}`;
+            span.textContent = seg.text;
+            diffNotesBody.appendChild(span);
+        });
+        diffNotesPopup.style.display = 'block';
+        setStatus(`diffnotes: ${granularity} diff shown.`);
+    }
+
+    function closeDiffNotesPopup() {
+        if (diffNotesPopup) diffNotesPopup.style.display = 'none';
+    }
+
+    function cancelDiffNotesMode(message = 'diffnotes: note selection cancelled.') {
+        diffNotesPickState = null;
+        editor.classList.remove('diff-notes-picking');
+        setStatus(message);
+    }
+
+    function startDiffNotesPickMode(opts = {}) {
+        diffNotesPickState = { first: null, opts: normalizedDiffOptions(opts) };
+        editor.classList.add('diff-notes-picking');
+        setStatus('diffnotes: click the first note, then the second note. Esc cancels.');
+    }
+
+    function handleDiffNotesPickClick(event) {
+        const button = getNoteButtonFromTarget(event.target);
+        if (!button || !diffNotesPickState) return;
+        if (!diffNotesPickState.first) {
+            diffNotesPickState.first = button;
+            setStatus('diffnotes: first note selected; click the second note.');
+            return;
+        }
+        const first = diffNotesPickState.first;
+        const opts = diffNotesPickState.opts;
+        cancelDiffNotesMode('diffnotes: comparing selected notes.');
+        diffnotes(first, button, opts);
+    }
+
+    function diffnotes(note1, note2, opts = {}) {
+        if (arguments.length === 0 || (arguments.length === 1 && typeof note1 === 'object' && !note1.nodeType)) {
+            startDiffNotesPickMode(normalizedDiffOptions(note1 || {}));
+            return;
+        }
+        const options = normalizedDiffOptions(opts);
+        const left = getDiffNoteText(note1);
+        const right = getDiffNoteText(note2);
+        ensureDiffNotesPopup();
+        diffNotesPopup.dataset.left = base64EncodeUtf8(left);
+        diffNotesPopup.dataset.right = base64EncodeUtf8(right);
+        renderDiffNotesPopup(left, right, options);
     }
 
     function ensureTextPopup() {
@@ -3940,6 +4437,44 @@
         });
         setStatus(`Removed ${removed} visibly empty top-level node${removed === 1 ? '' : 's'}.`);
         scheduleSend();
+    }
+
+    function delete_empty_lines() {
+        const html = editor.innerHTML;
+        const lines = String(html || '').split(/(<br\s*\/?>|\n)/i);
+        const output = [];
+        let removed = 0;
+        for (let i = 0; i < lines.length; i += 1) {
+            const part = lines[i];
+            if (/^(<br\s*\/?>|\n)$/i.test(part)) {
+                output.push(part);
+                continue;
+            }
+            const probe = document.createElement('div');
+            probe.innerHTML = part;
+            if (lineHtmlIsEmpty(probe)) {
+                removed += 1;
+                if (output.length && /^(<br\s*\/?>|\n)$/i.test(output[output.length - 1])) {
+                    output.pop();
+                }
+            } else {
+                output.push(part);
+            }
+        }
+        editor.innerHTML = output.join('');
+        hydrateEditorControls(editor);
+        setStatus(`delete_empty_lines: removed ${removed} empty line${removed === 1 ? '' : 's'}.`);
+        scheduleSend();
+        return removed;
+    }
+
+    function lineHtmlIsEmpty(container) {
+        if (container.querySelector('img, svg, video, audio, canvas, iframe, button, input, select, textarea, table')) {
+            return false;
+        }
+        return (container.textContent || '')
+            .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
+            .trim() === '';
     }
 
     function isVisiblyEmptyNode(node) {
