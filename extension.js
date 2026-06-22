@@ -1,4 +1,5 @@
 const vscode = require('vscode');
+const fs = require('fs');
 
 const VIEW_TYPE = 'spectralweb.richEditor';
 
@@ -48,7 +49,10 @@ class SpectralWebEditorProvider {
 
         webviewPanel.webview.options = {
             enableScripts: true,
-            localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')]
+            localResourceRoots: [
+                vscode.Uri.joinPath(this.context.extensionUri, 'media'),
+                vscode.Uri.joinPath(this.context.extensionUri, 'plugins')
+            ]
         };
 
         const editorHtml = await this.loadInitialEditorHtml(document);
@@ -186,6 +190,7 @@ class SpectralWebEditorProvider {
         const nonce = getNonce();
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'editor.js'));
         const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'editor.css'));
+        const pluginScriptTags = this.getPluginScriptTags(webview, nonce);
         const state = JSON.stringify({
             sourceFileName: basename(document.uri),
             richLayerFileName: `${basename(document.uri)}.html`,
@@ -297,12 +302,39 @@ class SpectralWebEditorProvider {
         <textarea id="statusText" rows="2" readonly></textarea>
         <span id="status" aria-live="polite"></span>
       </div>
+      <div class="toolbar spectral-plugin-toolbar" id="spectral-plugin-toolbar" role="toolbar" aria-label="Spectral Web plugin toolbar"></div>
     </div>
     <div id="editor" class="editor" contenteditable="true" spellcheck="false" aria-label="Spectral Web editor"></div>
   </main>
   <script nonce="${nonce}" src="${scriptUri}"></script>
+  ${pluginScriptTags}
 </body>
 </html>`;
+    }
+
+    getPluginScriptTags(webview, nonce) {
+        const pluginDir = vscode.Uri.joinPath(this.context.extensionUri, 'plugins');
+        let entries = [];
+        try {
+            entries = fs.readdirSync(pluginDir.fsPath, { withFileTypes: true });
+        } catch {
+            return '';
+        }
+
+        const pluginFiles = entries
+            .filter(entry => entry.isFile())
+            .map(entry => entry.name)
+            .filter(name => name === 'plugins.js' || /^plugin_.*\.js$/i.test(name))
+            .sort((a, b) => {
+                if (a === 'plugins.js') return -1;
+                if (b === 'plugins.js') return 1;
+                return a.localeCompare(b);
+            });
+
+        return pluginFiles.map(name => {
+            const uri = webview.asWebviewUri(vscode.Uri.joinPath(pluginDir, name));
+            return `<script nonce="${nonce}" src="${escapeHtml(String(uri))}"></script>`;
+        }).join('\n  ');
     }
 }
 

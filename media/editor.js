@@ -47,6 +47,7 @@
     let diffNotesPickState = null;
     let diffContext = null;
     const jsCommandHistory = [];
+    const pluginCommands = new Map();
     let jsCommandHistoryIndex = -1;
 
     editor.innerHTML = initialState.initialEditorHtml || '';
@@ -451,7 +452,7 @@
         ensureJsCommandPopup();
         jsCommandInput.value = '';
         jsCommandHistoryIndex = jsCommandHistory.length;
-        jsCommandPopup.style.display = 'block';
+        jsCommandPopup.style.display = 'flex';
         jsCommandInput.focus();
     }
 
@@ -469,7 +470,7 @@
 
         const label = document.createElement('label');
         label.htmlFor = 'jsCommandInput';
-        label.textContent = 'JavaScript command';
+        label.textContent = 'Cmd';
 
         jsCommandInput = document.createElement('input');
         jsCommandInput.id = 'jsCommandInput';
@@ -478,13 +479,8 @@
         jsCommandInput.spellcheck = false;
         jsCommandInput.addEventListener('keydown', handleJsCommandKeydown);
 
-        const help = document.createElement('div');
-        help.className = 'js-command-help';
-        help.textContent = 'Enter runs. Up/Down history. Esc closes. Examples: snake, renderMarkdown(), incrementIntegers("-?\\\\d+", 1)';
-
         jsCommandPopup.appendChild(label);
         jsCommandPopup.appendChild(jsCommandInput);
-        jsCommandPopup.appendChild(help);
         document.body.appendChild(jsCommandPopup);
     }
 
@@ -509,14 +505,15 @@
             }
         } else if (event.key === 'Escape') {
             event.preventDefault();
-            hideJsCommandPopup();
+            jsCommandInput.value = '';
+            jsCommandInput.focus();
         }
     }
 
     async function runJsCommand(rawCommand) {
         const command = String(rawCommand || '').trim();
         if (!command) {
-            hideJsCommandPopup();
+            jsCommandInput.focus();
             return;
         }
         jsCommandHistory.push(command);
@@ -526,11 +523,17 @@
             const result = await evaluateJsCommand(command);
             setStatus(result === undefined ? `JS Cmd ran: ${command}` : `JS Cmd result: ${String(result)}`);
             scheduleSend();
-            hideJsCommandPopup();
+            jsCommandInput.value = '';
+            jsCommandInput.focus();
         } catch (error) {
             setStatus(`JS Cmd error: ${error.message}`);
             console.error('[JS Cmd Error]', error);
         }
+    }
+
+    function hideCmd() {
+        hideJsCommandPopup();
+        return '';
     }
 
     function evaluateJsCommand(command) {
@@ -557,6 +560,7 @@
             insertmedia: () => insertMediaFileAtSavedRange(),
             media: () => insertMediaFileAtSavedRange(),
             cmdhelp: () => cmdhelp(),
+            hideCmd: () => hideCmd(),
             delete_empty_lines: () => delete_empty_lines(),
             block_color: () => block_color(),
             nested_block_color: () => nested_block_color()
@@ -564,12 +568,68 @@
         if (Object.prototype.hasOwnProperty.call(aliases, normalizedCommand)) {
             return aliases[normalizedCommand]();
         }
+        if (pluginCommands.has(normalizedCommand)) {
+            return runPluginCommand(normalizedCommand);
+        }
 
         let toEval = command;
         if (!/[()=]/.test(toEval)) {
             toEval += '()';
         }
         return eval(toEval);
+    }
+
+    function registerPluginCommand(name, fn) {
+        const commandName = String(name || '').trim();
+        if (!commandName || typeof fn !== 'function') {
+            throw new Error('Spectral.registerCommand(name, fn) requires a command name and function.');
+        }
+        pluginCommands.set(commandName, fn);
+        return commandName;
+    }
+
+    function runPluginCommand(name, ...args) {
+        const commandName = String(name || '').trim();
+        const fn = pluginCommands.get(commandName);
+        if (!fn) {
+            throw new Error(`Unknown plugin command: ${commandName}`);
+        }
+        return fn(...args);
+    }
+
+    function addPluginToolbarButton(label, handler, options = {}) {
+        if (typeof handler !== 'function') {
+            throw new Error('Spectral.addToolbarButton(label, handler) requires a handler function.');
+        }
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = String(label || 'Plugin');
+        if (options.id) {
+            button.id = String(options.id);
+        }
+        if (options.title) {
+            button.title = String(options.title);
+        }
+        button.addEventListener('click', () => {
+            try {
+                const result = handler();
+                if (result !== undefined) {
+                    setStatus(String(result));
+                }
+                scheduleSend();
+            } catch (error) {
+                setStatus(`Plugin button error: ${error.message}`);
+                console.error('[Spectral Plugin Button Error]', error);
+            }
+        });
+
+        const toolbar = document.getElementById('spectral-plugin-toolbar')
+            || document.querySelector('#top_toolbars .toolbar');
+        if (!toolbar) {
+            throw new Error('Plugin toolbar target not found.');
+        }
+        toolbar.appendChild(button);
+        return button;
     }
 
     function saveSnapshot() {
@@ -648,6 +708,362 @@
         if (statusText) {
             statusText.value = text;
         }
+    }
+
+    const popupTextSearchStates = {};
+
+    function getPopupTextSearchState(targetId) {
+        if (!popupTextSearchStates[targetId]) {
+            popupTextSearchStates[targetId] = {
+                bg: '#fff2a8',
+                fg: '#000000',
+                last: '',
+                pos: -1
+            };
+        }
+        return popupTextSearchStates[targetId];
+    }
+
+    function popupSearchControlId(targetId, suffix) {
+        return `${targetId}_popupSearch_${suffix}`;
+    }
+
+    function popupTextSearchOverlayId(targetId) {
+        return `${targetId}_popupSearch_overlay`;
+    }
+
+    function ensurePopupTextSearchControls(popup, target, insertBefore = target) {
+        if (!popup || !target || !target.id) return null;
+        const targetId = target.id;
+        const existing = document.getElementById(popupSearchControlId(targetId, 'bar'));
+        if (existing) return existing;
+
+        const state = getPopupTextSearchState(targetId);
+        const bar = document.createElement('div');
+        bar.id = popupSearchControlId(targetId, 'bar');
+        bar.className = 'popup-text-search-controls';
+        bar.innerHTML = [
+            `<label for="${popupSearchControlId(targetId, 'input')}">Find:</label>`,
+            `<input id="${popupSearchControlId(targetId, 'input')}" type="text" class="popup-text-search-input">`,
+            `<label>BG <input id="${popupSearchControlId(targetId, 'bg')}" type="color" value="${state.bg}"></label>`,
+            `<label>FG <input id="${popupSearchControlId(targetId, 'fg')}" type="color" value="${state.fg}"></label>`,
+            `<button type="button" id="${popupSearchControlId(targetId, 'clear')}">Clear</button>`,
+            `<span id="${popupSearchControlId(targetId, 'count')}" class="popup-text-search-count"></span>`
+        ].join('');
+
+        popup.insertBefore(bar, insertBefore || target);
+
+        const input = document.getElementById(popupSearchControlId(targetId, 'input'));
+        const bg = document.getElementById(popupSearchControlId(targetId, 'bg'));
+        const fg = document.getElementById(popupSearchControlId(targetId, 'fg'));
+        const clear = document.getElementById(popupSearchControlId(targetId, 'clear'));
+
+        input.addEventListener('keydown', event => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            popupTextSearchNext(targetId, event.shiftKey ? -1 : 1);
+        });
+        input.addEventListener('input', () => {
+            if (input.value === '') popupTextSearchClear(targetId);
+        });
+        bg.addEventListener('input', () => {
+            state.bg = bg.value;
+            popupTextSearchRehighlight(targetId);
+        });
+        fg.addEventListener('input', () => {
+            state.fg = fg.value;
+            popupTextSearchRehighlight(targetId);
+        });
+        clear.addEventListener('click', () => popupTextSearchClear(targetId));
+
+        return bar;
+    }
+
+    function popupTextSearchSetCount(targetId, text) {
+        const count = document.getElementById(popupSearchControlId(targetId, 'count'));
+        if (count) count.textContent = text || '';
+    }
+
+    function popupTextSearchRestoreInputFocus(targetId) {
+        const input = document.getElementById(popupSearchControlId(targetId, 'input'));
+        if (!input) return;
+        window.requestAnimationFrame(() => {
+            input.focus();
+            const end = input.value.length;
+            input.setSelectionRange(end, end);
+        });
+    }
+
+    function popupTextSearchClear(targetId) {
+        const state = getPopupTextSearchState(targetId);
+        const input = document.getElementById(popupSearchControlId(targetId, 'input'));
+        const target = document.getElementById(targetId);
+        if (input) input.value = '';
+        state.last = '';
+        state.pos = -1;
+        if (target && target.matches('textarea,input')) {
+            target.setSelectionRange(target.selectionStart || 0, target.selectionStart || 0);
+        }
+        popupTextSearchClearDomHighlights(targetId);
+        popupTextSearchSetCount(targetId, '');
+    }
+
+    function popupTextSearchClearDomHighlights(targetId) {
+        const target = document.getElementById(targetId);
+        if (!target) return;
+        if (target.matches('textarea,input')) {
+            const overlay = document.getElementById(popupTextSearchOverlayId(targetId));
+            if (overlay) {
+                overlay.innerHTML = '';
+                overlay.style.display = 'none';
+            }
+            target.classList.remove('popup-search-text-input');
+            return;
+        }
+        target.querySelectorAll('span.popup-search-hit').forEach(span => {
+            if (span.dataset.popupSearchTarget === targetId) {
+                span.replaceWith(document.createTextNode(span.textContent || ''));
+            }
+        });
+        target.normalize();
+    }
+
+    function popupTextSearchRehighlight(targetId) {
+        const state = getPopupTextSearchState(targetId);
+        const input = document.getElementById(popupSearchControlId(targetId, 'input'));
+        if (!state.last && !(input && input.value)) return;
+        const previous = state.pos;
+        state.last = '';
+        state.pos = previous - 1;
+        popupTextSearchNext(targetId, 1);
+    }
+
+    function popupTextSearchNext(targetId, direction = 1) {
+        const target = document.getElementById(targetId);
+        const input = document.getElementById(popupSearchControlId(targetId, 'input'));
+        if (!target || !input) return;
+
+        const needle = input.value;
+        if (!needle) {
+            popupTextSearchClear(targetId);
+            return;
+        }
+
+        const state = getPopupTextSearchState(targetId);
+        if (needle !== state.last) {
+            state.last = needle;
+            state.pos = direction < 0 ? 0 : -1;
+        }
+
+        if (target.matches('textarea,input')) {
+            popupTextSearchNextInTextInput(target, targetId, needle, direction);
+        } else {
+            popupTextSearchNextInElement(target, targetId, needle, direction);
+        }
+    }
+
+    function popupTextSearchNextInTextInput(target, targetId, needle, direction) {
+        const state = getPopupTextSearchState(targetId);
+        const text = target.value || '';
+        const starts = [];
+        let idx = text.indexOf(needle);
+        while (idx !== -1) {
+            starts.push(idx);
+            idx = text.indexOf(needle, idx + Math.max(needle.length, 1));
+        }
+
+        if (!starts.length) {
+            popupTextSearchSetCount(targetId, '0');
+            popupTextSearchClearDomHighlights(targetId);
+            popupTextSearchRestoreInputFocus(targetId);
+            return;
+        }
+
+        state.pos = (state.pos + direction + starts.length) % starts.length;
+        const start = starts[state.pos];
+        target.setSelectionRange(start, start);
+        popupTextSearchRenderTextInputHighlights(target, targetId, starts, state.pos, needle.length, state.bg, state.fg);
+        target.classList.add('popup-search-text-input');
+        target.style.setProperty('--popup-search-bg', state.bg);
+        target.style.setProperty('--popup-search-fg', state.fg);
+        popupTextSearchSetCount(targetId, `${state.pos + 1}/${starts.length}`);
+        popupTextSearchRestoreInputFocus(targetId);
+    }
+
+    function popupTextSearchEnsureTextInputOverlay(target, targetId) {
+        let overlay = document.getElementById(popupTextSearchOverlayId(targetId));
+        if (overlay) return overlay;
+        overlay = document.createElement('div');
+        overlay.id = popupTextSearchOverlayId(targetId);
+        overlay.className = 'popup-text-search-overlay';
+        overlay.style.display = 'none';
+        popupTextSearchBindTemporaryDoubleClickHighlights(overlay);
+        target.parentNode.insertBefore(overlay, target);
+        return overlay;
+    }
+
+    function popupTextSearchRenderTextInputHighlights(target, targetId, starts, currentIndex, needleLength, bg, fg) {
+        const overlay = popupTextSearchEnsureTextInputOverlay(target, targetId);
+        const text = target.value || '';
+        overlay.innerHTML = '';
+        overlay.style.display = 'block';
+
+        let cursor = 0;
+        starts.forEach((start, index) => {
+            if (start > cursor) {
+                overlay.appendChild(document.createTextNode(text.slice(cursor, start)));
+            }
+            const span = document.createElement('span');
+            span.className = index === currentIndex ? 'popup-search-hit popup-search-current' : 'popup-search-hit';
+            span.dataset.popupSearchTarget = targetId;
+            span.style.backgroundColor = bg;
+            span.style.color = fg;
+            if (index === currentIndex) span.style.textDecoration = 'underline';
+            span.textContent = text.slice(start, start + needleLength);
+            overlay.appendChild(span);
+            cursor = start + needleLength;
+        });
+        if (cursor < text.length) {
+            overlay.appendChild(document.createTextNode(text.slice(cursor)));
+        }
+
+        const current = overlay.querySelector('.popup-search-current');
+        if (current) {
+            window.requestAnimationFrame(() => current.scrollIntoView({ block: 'center', inline: 'nearest' }));
+        }
+    }
+
+    function popupTextSearchBindTemporaryDoubleClickHighlights(element) {
+        if (!element || element.dataset.popupTempDblclickBound === 'true') return;
+        element.dataset.popupTempDblclickBound = 'true';
+        element.addEventListener('dblclick', popupTextSearchTemporaryHighlightDoubleClick);
+    }
+
+    function popupTextSearchTemporaryHighlightDoubleClick(event) {
+        const root = event.currentTarget;
+        const selection = window.getSelection();
+        const word = selection ? selection.toString().trim() : '';
+        if (!word) return;
+        popupTextSearchHighlightTemporaryOccurrences(root, word);
+    }
+
+    function popupTextSearchHighlightTemporaryOccurrences(root, word) {
+        const color = randomHilightColor();
+        const matches = [];
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                const parent = node.parentElement;
+                if (!node.nodeValue || !parent || parent.closest('.popup-overlay-temp-highlight')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        });
+
+        let node = walker.nextNode();
+        while (node) {
+            collectWholeWordMatches(node, word).forEach(match => matches.push(match));
+            node = walker.nextNode();
+        }
+
+        matches.reverse().forEach(match => {
+            const range = document.createRange();
+            range.setStart(match.node, match.start);
+            range.setEnd(match.node, match.end);
+            const span = document.createElement('span');
+            span.className = 'popup-overlay-temp-highlight';
+            span.style.backgroundColor = color;
+            range.surroundContents(span);
+        });
+    }
+
+    function popupTextSearchNodeFilter(node) {
+        const parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        if (parent.closest('.popup-text-search-controls, .popup-search-hit, script, style, textarea, input, select, button')) {
+            return NodeFilter.FILTER_REJECT;
+        }
+        return node.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+
+    function popupTextSearchBuildIndex(target) {
+        const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, { acceptNode: popupTextSearchNodeFilter });
+        const textNodes = [];
+        let text = '';
+        let node;
+        while ((node = walker.nextNode())) {
+            const start = text.length;
+            text += node.nodeValue;
+            textNodes.push({ node, start, end: text.length });
+        }
+        return { text, textNodes };
+    }
+
+    function popupTextSearchNextInElement(target, targetId, needle, direction) {
+        const state = getPopupTextSearchState(targetId);
+        popupTextSearchClearDomHighlights(targetId);
+
+        const { text, textNodes } = popupTextSearchBuildIndex(target);
+        const ranges = [];
+        let idx = text.indexOf(needle);
+        while (idx !== -1) {
+            ranges.push({ start: idx, end: idx + needle.length });
+            idx = text.indexOf(needle, idx + Math.max(needle.length, 1));
+        }
+
+        if (!ranges.length) {
+            popupTextSearchSetCount(targetId, '0');
+            return;
+        }
+
+        state.pos = (state.pos + direction + ranges.length) % ranges.length;
+        popupTextSearchApplyElementHighlights(targetId, textNodes, ranges, state.pos, state.bg, state.fg);
+        const current = Array.from(target.querySelectorAll('span.popup-search-current'))
+            .find(span => span.dataset.popupSearchTarget === targetId);
+        if (current) current.scrollIntoView({ block: 'center', inline: 'nearest' });
+        popupTextSearchSetCount(targetId, `${state.pos + 1}/${ranges.length}`);
+        popupTextSearchRestoreInputFocus(targetId);
+    }
+
+    function popupTextSearchApplyElementHighlights(targetId, textNodes, ranges, currentIndex, bg, fg) {
+        const pieces = [];
+        ranges.forEach((range, rangeIndex) => {
+            textNodes.forEach(({ node, start, end }, order) => {
+                if (end <= range.start || start >= range.end) return;
+                pieces.push({
+                    node,
+                    order,
+                    rangeIndex,
+                    spanStart: Math.max(range.start, start) - start,
+                    spanEnd: Math.min(range.end, end) - start
+                });
+            });
+        });
+
+        pieces.sort((a, b) => {
+            if (a.order !== b.order) return b.order - a.order;
+            return b.spanStart - a.spanStart;
+        });
+
+        pieces.forEach(({ node, rangeIndex, spanStart, spanEnd }) => {
+            if (!node.parentNode || spanStart >= spanEnd) return;
+            const range = document.createRange();
+            range.setStart(node, spanStart);
+            range.setEnd(node, spanEnd);
+            const span = document.createElement('span');
+            span.className = rangeIndex === currentIndex ? 'popup-search-hit popup-search-current' : 'popup-search-hit';
+            span.dataset.popupSearchTarget = targetId;
+            span.style.backgroundColor = bg;
+            span.style.color = fg;
+            if (rangeIndex === currentIndex) span.style.textDecoration = 'underline';
+            try {
+                range.surroundContents(span);
+            } catch (_) {
+                const fragment = range.extractContents();
+                span.appendChild(fragment);
+                range.insertNode(span);
+            }
+        });
     }
 
     function removeInlineStyle(styleName) {
@@ -1880,6 +2296,8 @@
                 title: 'Core',
                 commands: [
                     ['cmdhelp()', 'Show this command reference.'],
+                    ['hideCmd()', 'Hide the bottom JS command bar.'],
+                    ['Spectral.commandNames()', 'List plugin commands registered with Spectral.registerCommand().'],
                     ['clear()', 'Clear temporary highlights.'],
                     ['reflow(60)', 'Rewrap selected text near the requested column.'],
                     ['delete_empty_lines()', 'Delete whitespace-only editor lines.']
@@ -1888,6 +2306,7 @@
             {
                 title: 'Notes',
                 commands: [
+                    ['createNote("3.7", "note text")', 'Create a note button at a line.character, line.end, or end index.'],
                     ['diffnotes()', 'Click two note buttons and compare their contents. F7 starts the same mode.'],
                     ['diffnotes({ granularity: "word" })', 'Compare notes by word; use "line", "word", or "char".'],
                     ['setDiffContext(2, 2)', 'Show changed lines plus context in line note diffs.'],
@@ -1906,6 +2325,8 @@
             {
                 title: 'Text',
                 commands: [
+                    ['insertTextAtIndex("3.7", "text")', 'Insert text at an explicit index.'],
+                    ['inserText("end", "text")', 'Short alias for insertTextAtIndex().'],
                     ['uc, lc, tc', 'Uppercase, lowercase, or titlecase selected text.'],
                     ['camel, snake, kebab', 'Convert selected text case.'],
                     ['mdrender()', 'Render Markdown in the editor.'],
@@ -1927,6 +2348,7 @@
         ensureHelpPopup();
         helpPopup.querySelector('.help-popup-body').innerHTML = renderCommandHelpHtml();
         helpPopup.style.display = 'block';
+        ensurePopupTextSearchControls(helpPopup, helpPopup.querySelector('.help-popup-body'), helpPopup.querySelector('.help-popup-body'));
     }
 
     function ensureHelpPopup() {
@@ -1949,6 +2371,7 @@
         header.appendChild(closeButton);
 
         const body = document.createElement('div');
+        body.id = 'helpPopupBody';
         body.className = 'help-popup-body';
         body.innerHTML = `<pre>${escapeHtml([
             'Ctrl+S            Save source and companion HTML layer',
@@ -1987,6 +2410,7 @@
         helpPopup.appendChild(header);
         helpPopup.appendChild(body);
         document.body.appendChild(helpPopup);
+        ensurePopupTextSearchControls(helpPopup, body, body);
     }
 
     function showHtmlInsertPrompt() {
@@ -3013,6 +3437,34 @@
         scheduleSend();
     }
 
+    function insertText(indexStr, text) {
+        return insertTextAtIndex(indexStr, text);
+    }
+
+    function inserText(indexStr, text) {
+        return insertTextAtIndex(indexStr, text);
+    }
+
+    function createNote(indexStr, text, label = '') {
+        const range = rangeFromIndex(indexStr);
+        if (!range) {
+            setStatus(`Invalid index: ${indexStr}`);
+            return null;
+        }
+        const button = makeMessageButton(label, base64EncodeUtf8(String(text || '')));
+        range.insertNode(button);
+        range.setStartAfter(button);
+        range.collapse(true);
+
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        savedEditorRange = range.cloneRange();
+        setStatus(`Created note at ${indexStr}.`);
+        scheduleSend();
+        return button;
+    }
+
     function addCursorAtIndex(indexStr) {
         const range = rangeFromIndex(indexStr);
         if (!range) {
@@ -3065,6 +3517,9 @@
 
     function getTextPositionForPlainOffset(targetOffset) {
         const target = Math.max(0, targetOffset);
+        if (target >= getPlainTextForIndexing().length) {
+            return { node: editor, offset: editor.childNodes.length };
+        }
         const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
             acceptNode(node) {
                 if (node.nodeType === Node.ELEMENT_NODE) {
@@ -3903,6 +4358,7 @@
         popupHeading.textContent = heading || '';
         popupTextarea.value = initialText || '';
         textPopup.style.display = 'block';
+        ensurePopupTextSearchControls(textPopup, popupTextarea, popupTextarea);
         popupTextarea.focus();
     }
 
@@ -3947,14 +4403,18 @@
         showNoteEditPopup(event.currentTarget || event.target);
     }
 
-    function createMessageButton(label, encodedMessage) {
+    function makeMessageButton(label, encodedMessage) {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'note-button';
         button.setAttribute('data-message', encodedMessage);
         button.textContent = label || '';
         button.addEventListener('click', noteButtonClickHandler);
-        insertNodeAtSelection(button);
+        return button;
+    }
+
+    function createMessageButton(label, encodedMessage) {
+        insertNodeAtSelection(makeMessageButton(label, encodedMessage));
     }
 
     function getNoteButtonFromTarget(target) {
@@ -4131,10 +4591,13 @@
         header.appendChild(title);
         header.appendChild(controls);
         diffNotesBody = document.createElement('pre');
+        diffNotesBody.id = 'diffNotesBody';
         diffNotesBody.className = 'diff-notes-body';
+        popupTextSearchBindTemporaryDoubleClickHighlights(diffNotesBody);
         diffNotesPopup.appendChild(header);
         diffNotesPopup.appendChild(diffNotesBody);
         document.body.appendChild(diffNotesPopup);
+        ensurePopupTextSearchControls(diffNotesPopup, diffNotesBody, diffNotesBody);
     }
 
     function renderDiffNotesPopup(text1, text2, opts = {}) {
@@ -4149,6 +4612,7 @@
             segments = applyLineDiffContext(segments, diffContext);
         }
         diffNotesBody.innerHTML = '';
+        popupTextSearchClearDomHighlights(diffNotesBody.id);
         segments.forEach(seg => {
             const span = document.createElement('span');
             span.className = `diff-notes-${seg.type}`;
@@ -5354,4 +5818,51 @@
             return '';
         }
     }
+
+    window.Spectral = {
+        version: 1,
+        editor,
+        registerCommand: registerPluginCommand,
+        runCommand: runPluginCommand,
+        commandNames: () => Array.from(pluginCommands.keys()),
+        addToolbarButton: addPluginToolbarButton,
+        setStatus,
+        scheduleSend,
+        hydrateEditorControls,
+        insertTextAtIndex,
+        insertText,
+        inserText,
+        createNote,
+        addCursorAtIndex,
+        selectRangeByIndex,
+        block_color,
+        nested_block_color,
+        diffnotes,
+        setDiffContext,
+        clearDiffContext,
+        clearAllHighlight,
+        renderMarkdown,
+        copyMarkdownToClipboard,
+        hideCmd,
+        cmdhelp,
+        showTextPopup,
+        getPlainText: getPlainTextForIndexing,
+        getEditorHtml: () => editor.innerHTML,
+        setEditorHtml: html => {
+            editor.innerHTML = String(html || '');
+            hydrateEditorControls(editor);
+            scheduleSend();
+        },
+        api: {
+            get savedEditorRange() {
+                return savedEditorRange;
+            },
+            set savedEditorRange(range) {
+                savedEditorRange = range;
+            },
+            get cursors() {
+                return cursors;
+            }
+        }
+    };
 })();

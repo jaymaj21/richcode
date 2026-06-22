@@ -437,39 +437,40 @@ abbrev {
 .js-command-popup {
     display: none;
     position: fixed;
-    top: 18%;
-    left: 50%;
-    transform: translateX(-50%);
-    width: min(760px, calc(100vw - 32px));
-    background: #ffffff;
-    color: #111111;
+    left: 8px;
+    right: 8px;
+    bottom: 4px;
+    align-items: center;
+    gap: 6px;
+    box-sizing: border-box;
+    height: 28px;
+    background: var(--vscode-editor-background, #ffffff);
+    color: var(--vscode-editor-foreground, #111111);
     border: 1px solid var(--vscode-panel-border, #777777);
-    box-shadow: 0 2px 18px rgba(0, 0, 0, 0.35);
-    padding: 10px;
+    box-shadow: 0 -1px 4px rgba(0, 0, 0, 0.22);
+    padding: 2px 6px;
     z-index: 1002;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 12px;
 }
 
 .js-command-popup label {
-    display: block;
+    flex: 0 0 auto;
     font-weight: bold;
-    margin-bottom: 6px;
 }
 
 .js-command-popup input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 22px;
     box-sizing: border-box;
-    width: 100%;
-    background: #ffffff;
-    color: #111111;
+    background: var(--vscode-input-background, #ffffff);
+    color: var(--vscode-input-foreground, #111111);
     border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, #777777));
     font-family: "Courier New", Courier, monospace;
-    font-size: 13px;
-    padding: 6px;
-}
-
-.js-command-help {
-    margin-top: 6px;
-    color: #555555;
     font-size: 12px;
+    padding: 1px 5px;
+    outline: none;
 }
 
 .editor audio {
@@ -648,6 +649,77 @@ abbrev {
     color: #111111;
     border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, #777777));
     font-family: "Courier New", Courier, monospace;
+}
+
+.popup-text-search-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 0;
+    border-bottom: 1px solid #dddddd;
+    margin-bottom: 6px;
+}
+
+.popup-text-search-controls label {
+    font-size: 12px;
+}
+
+.popup-text-search-input {
+    min-width: 180px;
+    flex: 1 1 220px;
+}
+
+.popup-text-search-controls input[type="color"] {
+    width: 32px;
+    min-width: 32px;
+    padding: 0;
+}
+
+.popup-text-search-count {
+    min-width: 48px;
+    color: #555555;
+    font-size: 12px;
+}
+
+.popup-search-hit {
+    border-radius: 2px;
+}
+
+.popup-search-current {
+    outline: 1px solid #111111;
+    outline-offset: 1px;
+}
+
+.popup-text-search-overlay {
+    box-sizing: border-box;
+    width: 100%;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, #777777));
+    background: var(--vscode-editor-background, #ffffff);
+    color: var(--vscode-editor-foreground, #111111);
+    padding: 6px;
+    margin: 0 0 8px;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 13px;
+    line-height: 1.35;
+}
+
+.popup-text-search-overlay:empty {
+    display: none;
+}
+
+.popup-overlay-temp-highlight {
+    border-radius: 2px;
+}
+
+.text-popup textarea::selection {
+    background: var(--popup-search-bg, Highlight);
+    color: var(--popup-search-fg, HighlightText);
 }
 
 .text-popup-actions {
