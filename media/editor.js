@@ -198,31 +198,6 @@
         }
     });
 
-    async function copySelectionOuterHtmlToClipboard() {
-        const range = getCurrentEditorSelectionRange();
-        if (!range) {
-            setStatus('F6 copy: no editor selection.');
-            return '';
-        }
-
-        const container = document.createElement('div');
-        container.appendChild(range.cloneContents());
-        const html = container.innerHTML;
-        if (!html) {
-            setStatus('F6 copy: selected editor content has no HTML.');
-            return '';
-        }
-
-        try {
-            await navigator.clipboard.writeText(html);
-            setStatus(`F6 copy: selected HTML source copied (${html.length} chars).`);
-            return html;
-        } catch (error) {
-            setStatus(`F6 copy failed: ${error.message}`);
-            return '';
-        }
-    }
-
     document.getElementById('insert-html').addEventListener('click', () => {
         insertOrConvertHtml();
     });
@@ -340,9 +315,6 @@
         if (event.key === 'Escape' && diffNotesPickState) {
             event.preventDefault();
             cancelDiffNotesMode('diffnotes: note selection cancelled.');
-        } else if (event.key === 'F6') {
-            event.preventDefault();
-            copySelectionOuterHtmlToClipboard();
         } else if (event.key === 'F7') {
             event.preventDefault();
             diffnotes();
@@ -600,8 +572,6 @@
             hl: () => showHighlightPopup(),
             delete_empty_lines: () => delete_empty_lines(),
             deleteEmptyLines: () => deleteEmptyLines(),
-            normalizeEditorDom: () => normalizeEditorDom(),
-            copySelectionOuterHtmlToClipboard: () => copySelectionOuterHtmlToClipboard(),
             block_color: () => block_color(),
             nested_block_color: () => nested_block_color()
         };
@@ -1028,9 +998,6 @@
             span.style.backgroundColor = color;
             range.surroundContents(span);
         });
-        if (matches.length) {
-            normalizeEditorDom(root, { quiet: true });
-        }
     }
 
     function popupTextSearchNodeFilter(node) {
@@ -1146,22 +1113,6 @@
         if (editor.contains(range.commonAncestorContainer)) {
             savedEditorRange = range.cloneRange();
         }
-    }
-
-    function getCurrentEditorSelectionRange() {
-        const selection = window.getSelection();
-        if (selection && selection.rangeCount > 0) {
-            const range = selection.getRangeAt(0);
-            if (!range.collapsed && editor.contains(range.commonAncestorContainer)) {
-                return range.cloneRange();
-            }
-        }
-
-        if (savedEditorRange && !savedEditorRange.collapsed && editor.contains(savedEditorRange.commonAncestorContainer)) {
-            return savedEditorRange.cloneRange();
-        }
-
-        return null;
     }
 
     function getInsertionRange() {
@@ -2376,8 +2327,6 @@
                     ['yp, yp(10)', 'Yank current line or next N lines, then paste them after the current line.'],
                     ['clear()', 'Clear temporary highlights.'],
                     ['reflow(60)', 'Rewrap selected text near the requested column.'],
-                    ['copySelectionOuterHtmlToClipboard()', 'Copy the current editor selection as literal UTF-8 HTML source. F6 runs the same command.'],
-                    ['normalizeEditorDom()', 'Lightly clean editor DOM after span-heavy edits without full HTML reparse.'],
                     ['deleteEmptyLines()', 'Delete whitespace-only editor lines. Alias: delete_empty_lines().']
                 ]
             },
@@ -2459,7 +2408,6 @@
             'Ctrl+i            Insert HTML / convert selected literal HTML',
             'Ctrl+m            Insert note',
             'Ctrl+q            Open JS command popup',
-            'F6                Copy selected editor HTML source',
             'F7                Diff two note buttons',
             'Ctrl+l            Record audio into the editor',
             'Ctrl+b            Toggle all toolbars',
@@ -3402,50 +3350,7 @@
         const range = document.createRange();
         range.setStart(start.node, start.offset);
         range.setEnd(end.node, end.offset);
-        if (end.node.nodeType === Node.TEXT_NODE && end.offset === end.node.textContent.length) {
-            extendRangeEndToTrailingLineControls(range, end.node, editor);
-        }
         return range;
-    }
-
-    function getNextNodeAfterSubtree(node, root) {
-        let current = node;
-        while (current && current !== root) {
-            if (current.nextSibling) return current.nextSibling;
-            current = current.parentNode;
-        }
-        return null;
-    }
-
-    function isTrailingLineControlCandidate(node) {
-        if (!node) return false;
-        if (node.nodeType === Node.TEXT_NODE) {
-            return node.nodeValue.trim() === '';
-        }
-        if (node.nodeType !== Node.ELEMENT_NODE) {
-            return false;
-        }
-        if (node.tagName === 'BR') {
-            return false;
-        }
-        if (node.matches && node.matches('.note-button')) {
-            return true;
-        }
-        return node.textContent.trim() === '';
-    }
-
-    function extendRangeEndToTrailingLineControls(range, anchorNode, root) {
-        let endNode = anchorNode;
-        let next = getNextNodeAfterSubtree(anchorNode, root);
-
-        while (next && isTrailingLineControlCandidate(next)) {
-            endNode = next;
-            next = getNextNodeAfterSubtree(next, root);
-        }
-
-        if (endNode && endNode !== anchorNode) {
-            range.setEndAfter(endNode);
-        }
     }
 
     function plainOffsetForRangeStart(range) {
@@ -5370,67 +5275,6 @@
         scheduleSend();
     }
 
-    function normalizeEditorDom(root = editor, opts = {}) {
-        if (!root) return { removedEmptySpans: 0, unwrappedPlainSpans: 0, mergedSpans: 0 };
-
-        const stats = { removedEmptySpans: 0, unwrappedPlainSpans: 0, mergedSpans: 0 };
-        const isInertPlainSpan = span =>
-            span.tagName === 'SPAN' &&
-            span.attributes.length === 0;
-        const isMergeableSpan = span =>
-            span.tagName === 'SPAN' &&
-            !span.id &&
-            !span.getAttributeNames().some(name => name.startsWith('data-') || name.startsWith('on')) &&
-            span.getAttributeNames().every(name => name === 'class' || name === 'style');
-        const sameSpanPresentation = (a, b) =>
-            a.className === b.className &&
-            (a.getAttribute('style') || '') === (b.getAttribute('style') || '');
-
-        root.normalize();
-
-        root.querySelectorAll('span').forEach(span => {
-            if (!span.parentNode) return;
-            if (isInertPlainSpan(span)) {
-                if (span.childNodes.length === 0) {
-                    span.remove();
-                    stats.removedEmptySpans++;
-                } else {
-                    span.replaceWith(...span.childNodes);
-                    stats.unwrappedPlainSpans++;
-                }
-            }
-        });
-
-        root.normalize();
-
-        Array.from(root.querySelectorAll('span')).reverse().forEach(span => {
-            if (!span.parentNode || !isMergeableSpan(span)) return;
-
-            let next = span.nextSibling;
-            while (next && next.nodeType === Node.TEXT_NODE && next.nodeValue === '') {
-                const empty = next;
-                next = next.nextSibling;
-                empty.remove();
-            }
-
-            if (next && next.nodeType === Node.ELEMENT_NODE && isMergeableSpan(next) && sameSpanPresentation(span, next)) {
-                while (next.firstChild) {
-                    span.appendChild(next.firstChild);
-                }
-                next.remove();
-                stats.mergedSpans++;
-            }
-        });
-
-        root.normalize();
-
-        if (!opts.quiet) {
-            setStatus(`Normalized editor DOM: removed ${stats.removedEmptySpans} empty span(s), unwrapped ${stats.unwrappedPlainSpans}, merged ${stats.mergedSpans}.`);
-            scheduleSend();
-        }
-        return stats;
-    }
-
     function removeSpansWithClass(className) {
         const spans = Array.from(editor.querySelectorAll(`span.${CSS.escape(String(className || ''))}`));
         spans.forEach(span => {
@@ -6012,9 +5856,6 @@
         }
 
         matches.reverse().forEach(match => wrapTextRange(match.node, match.start, match.end, color));
-        if (matches.length) {
-            normalizeEditorDom(editor, { quiet: true });
-        }
         return matches.length;
     }
 
@@ -6088,10 +5929,6 @@
                 span.setAttribute('data-spectral-search-result', '1');
             }
         });
-
-        if (matches.length) {
-            normalizeEditorDom(editor, { quiet: true });
-        }
 
         if (shouldShowResults) {
             showSearchResults(matches);
@@ -6412,7 +6249,6 @@
         setDiffContext,
         clearDiffContext,
         clearAllHighlight,
-        normalizeEditorDom,
         delete_empty_lines,
         deleteEmptyLines,
         yankLinesFromCaret,
@@ -6426,7 +6262,6 @@
         filteredSubstitute,
         renderMarkdown,
         copyMarkdownToClipboard,
-        copySelectionOuterHtmlToClipboard,
         hideCmd,
         cmdhelp,
         showTextPopup,
