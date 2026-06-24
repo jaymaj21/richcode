@@ -35,6 +35,7 @@
     let recordingStatus = null;
     let recordingStopButton = null;
     let mediaFileInput = null;
+    let svgFileInput = null;
     let jsCommandPopup = null;
     let jsCommandInput = null;
     let searchResultsPopup = null;
@@ -48,6 +49,8 @@
     let diffContext = null;
     const jsCommandHistory = [];
     const pluginCommands = new Map();
+    const pendingSvgFileReads = new Map();
+    const pendingFileContentReads = new Map();
     let jsCommandHistoryIndex = -1;
 
     editor.innerHTML = initialState.initialEditorHtml || '';
@@ -66,7 +69,9 @@
     document.querySelectorAll('[data-highlight]').forEach(button => {
         button.addEventListener('click', () => {
             editor.focus();
-            document.execCommand('hiliteColor', false, button.dataset.highlight);
+            if (!highlightSelectionIfNeeded(button.dataset.highlight, button.dataset.colid)) {
+                document.execCommand('hiliteColor', false, button.dataset.highlight);
+            }
             scheduleSend();
         });
     });
@@ -111,7 +116,9 @@
     document.getElementById('fontChooser').addEventListener('change', event => {
         if (event.target.value !== 'No Selection') {
             editor.focus();
-            document.execCommand('fontName', false, event.target.value);
+            if (!applyStyleToSvgSelectionIfNeeded({ fontFamily: event.target.value })) {
+                document.execCommand('fontName', false, event.target.value);
+            }
             scheduleSend();
         }
     });
@@ -119,7 +126,9 @@
     document.getElementById('sizeChooser').addEventListener('change', event => {
         if (event.target.value !== '0') {
             editor.focus();
-            document.execCommand('fontSize', false, event.target.value);
+            if (!applyStyleToSvgSelectionIfNeeded({ fontSize: fontSizeFromChooserValue(event.target.value) })) {
+                document.execCommand('fontSize', false, event.target.value);
+            }
             scheduleSend();
         }
     });
@@ -187,6 +196,10 @@
 
     document.getElementById('insert-media-file').addEventListener('click', () => {
         insertMediaFileAtSavedRange();
+    });
+
+    document.getElementById('insert-svg-file').addEventListener('click', () => {
+        insertSvg();
     });
 
     document.getElementById('copy-editor').addEventListener('click', async () => {
@@ -432,6 +445,10 @@
         }
         if (message.type === 'externalTextChanged') {
             setStatus('Plain source changed outside rich editor; rich HTML layer not merged.');
+        } else if (message.type === 'svgFileReadResult') {
+            handleSvgFileReadResult(message);
+        } else if (message.type === 'fileContentReadResult') {
+            handleFileContentReadResult(message);
         }
     });
 
@@ -536,7 +553,7 @@
         return '';
     }
 
-    function evaluateJsCommand(command) {
+    async function evaluateJsCommand(command) {
         const normalizedCommand = command.replace(/\(\s*\)$/, '');
         const lineShortcut = parseLineCommand(command);
         if (lineShortcut) {
@@ -561,6 +578,8 @@
             reflow: () => showReflowPopup(),
             insertmedia: () => insertMediaFileAtSavedRange(),
             media: () => insertMediaFileAtSavedRange(),
+            insertSvg: () => insertSvg(),
+            getIndex: () => getIndex(),
             cmdhelp: () => cmdhelp(),
             hideCmd: () => hideCmd(),
             yy: () => yankLinesFromCaret(1),
@@ -585,6 +604,9 @@
         let toEval = command;
         if (!/[()=]/.test(toEval)) {
             toEval += '()';
+        }
+        if (/\bawait\b/.test(toEval)) {
+            return eval(`(async () => (${toEval}))()`);
         }
         return eval(toEval);
     }
@@ -2159,6 +2181,275 @@
         document.body.appendChild(mediaFileInput);
     }
 
+    function insertSvg() {
+        saveEditorRange();
+        ensureSvgFileInput();
+        svgFileInput.click();
+        return 'Select an SVG file to insert.';
+    }
+
+    function insertSvgCode(index, svgText) {
+        const targetRange = rangeFromIndex(index);
+        if (!targetRange) {
+            setStatus(`Invalid index for insertSvgCode: ${index}`);
+            return null;
+        }
+
+        try {
+            const svg = parseSvgText(svgText);
+            insertNodeAtRange(svg, targetRange);
+            hydrateEditorControls(editor);
+            setStatus(`Inserted inline SVG at ${index}.`);
+            scheduleSend();
+            return svg;
+        } catch (error) {
+            setStatus(`Could not insert SVG code: ${error.message}`);
+            return null;
+        }
+    }
+
+    async function insertSvgFile(index, filename) {
+        const targetIndex = String(index || '').trim();
+        if (!rangeFromIndex(targetIndex)) {
+            setStatus(`Invalid index for insertSvgFile: ${index}`);
+            return null;
+        }
+
+        try {
+            const svgText = await readSvgFileFromHost(filename);
+            return insertSvgCode(targetIndex, svgText);
+        } catch (error) {
+            setStatus(`Could not insert SVG file: ${error.message}`);
+            return null;
+        }
+    }
+
+    function readSvgFileFromHost(filename) {
+        const requestId = `svg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        return new Promise((resolve, reject) => {
+            const timeout = window.setTimeout(() => {
+                pendingSvgFileReads.delete(requestId);
+                reject(new Error('Timed out waiting for SVG file read.'));
+            }, 15000);
+
+            pendingSvgFileReads.set(requestId, { resolve, reject, timeout });
+            vscode.postMessage({
+                type: 'readSvgFile',
+                requestId,
+                filename: String(filename || '')
+            });
+        });
+    }
+
+    function handleSvgFileReadResult(message) {
+        const pending = pendingSvgFileReads.get(message.requestId);
+        if (!pending) {
+            return;
+        }
+        pendingSvgFileReads.delete(message.requestId);
+        window.clearTimeout(pending.timeout);
+        if (message.ok) {
+            pending.resolve(String(message.text || ''));
+        } else {
+            pending.reject(new Error(message.error || 'SVG file read failed.'));
+        }
+    }
+
+    function readFileContent(filename) {
+        const requestId = `file_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        return new Promise((resolve, reject) => {
+            const timeout = window.setTimeout(() => {
+                pendingFileContentReads.delete(requestId);
+                reject(new Error('Timed out waiting for file read.'));
+            }, 15000);
+
+            pendingFileContentReads.set(requestId, { resolve, reject, timeout });
+            vscode.postMessage({
+                type: 'readFileContent',
+                requestId,
+                filename: String(filename || '')
+            });
+        });
+    }
+
+    function handleFileContentReadResult(message) {
+        const pending = pendingFileContentReads.get(message.requestId);
+        if (!pending) {
+            return;
+        }
+        pendingFileContentReads.delete(message.requestId);
+        window.clearTimeout(pending.timeout);
+        if (message.ok) {
+            pending.resolve(String(message.text || ''));
+        } else {
+            pending.reject(new Error(message.error || 'File read failed.'));
+        }
+    }
+
+    function ensureSvgFileInput() {
+        if (svgFileInput) {
+            return;
+        }
+        svgFileInput = document.createElement('input');
+        svgFileInput.type = 'file';
+        svgFileInput.accept = '.svg,image/svg+xml';
+        svgFileInput.style.display = 'none';
+        svgFileInput.addEventListener('change', event => {
+            const file = event.target.files && event.target.files[0];
+            if (!file) {
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    const svg = parseSvgText(reader.result || '');
+                    insertNodeAtSelection(svg);
+                    hydrateEditorControls(editor);
+                    setStatus(`Inserted inline SVG: ${file.name}`);
+                    scheduleSend();
+                } catch (error) {
+                    setStatus(`Could not insert SVG: ${error.message}`);
+                }
+            };
+            reader.onerror = () => setStatus(`Could not read SVG file: ${file.name}`);
+            reader.readAsText(file);
+            event.target.value = '';
+        });
+        document.body.appendChild(svgFileInput);
+    }
+
+    function insertNodeAtRange(node, range) {
+        if (!node || !range) {
+            return null;
+        }
+        range.deleteContents();
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.collapse(true);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        savedEditorRange = range.cloneRange();
+        return node;
+    }
+
+    function parseSvgText(svgText) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(String(svgText || ''), 'image/svg+xml');
+        const parseError = doc.querySelector('parsererror');
+        if (parseError) {
+            throw new Error(parseError.textContent.trim() || 'Invalid SVG file.');
+        }
+
+        const svg = doc.documentElement;
+        if (!svg || svg.localName.toLowerCase() !== 'svg') {
+            throw new Error('Selected file does not contain an SVG root element.');
+        }
+
+        return sanitizeImportedSvg(document.importNode(svg, true));
+    }
+
+    function sanitizeImportedSvg(svg) {
+        if (!svg) {
+            return null;
+        }
+        svg.querySelectorAll('script').forEach(node => node.remove());
+        [svg, ...svg.querySelectorAll('*')].forEach(element => {
+            Array.from(element.attributes).forEach(attribute => {
+                const name = attribute.name;
+                const value = attribute.value || '';
+                if (/^on/i.test(name) || (/href$/i.test(name) && /^\s*javascript:/i.test(value))) {
+                    element.removeAttribute(name);
+                }
+            });
+        });
+        if (!svg.getAttribute('xmlns')) {
+            svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        }
+        svg.setAttribute('data-spectral-inline-svg', '1');
+        svg.style.maxWidth = svg.style.maxWidth || '100%';
+        svg.style.height = svg.style.height || 'auto';
+        return svg;
+    }
+
+    function moveSvg(index) {
+        const svg = getSvgAtOrNearestCaret();
+        if (!svg) {
+            setStatus('No SVG found near the current caret.');
+            return null;
+        }
+
+        const targetRange = rangeFromIndex(index);
+        if (!targetRange) {
+            setStatus(`Invalid index for moveSvg: ${index}`);
+            return null;
+        }
+        if (svg.contains(targetRange.startContainer)) {
+            setStatus('Cannot move an SVG to a position inside itself.');
+            return null;
+        }
+
+        const marker = document.createComment('spectral-move-svg-target');
+        targetRange.insertNode(marker);
+        marker.parentNode.insertBefore(svg, marker);
+        marker.remove();
+
+        const after = document.createRange();
+        after.setStartAfter(svg);
+        after.collapse(true);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(after);
+        savedEditorRange = after.cloneRange();
+        hydrateEditorControls(editor);
+        setStatus(`Moved SVG to ${index}.`);
+        scheduleSend();
+        return svg;
+    }
+
+    function getSvgAtOrNearestCaret() {
+        const range = getEditorSelectionRange();
+        if (!range) {
+            return null;
+        }
+
+        const container = range.startContainer.nodeType === Node.ELEMENT_NODE
+            ? range.startContainer
+            : range.startContainer.parentNode;
+        const containingSvg = container && container.closest ? container.closest('svg') : null;
+        if (containingSvg && editor.contains(containingSvg)) {
+            return containingSvg;
+        }
+
+        const svgs = Array.from(editor.querySelectorAll('svg'));
+        if (!svgs.length) {
+            return null;
+        }
+
+        const caretOffset = plainOffsetForRangeStart(range);
+        let best = svgs[0];
+        let bestDistance = Number.POSITIVE_INFINITY;
+        svgs.forEach(svg => {
+            const offset = plainOffsetBeforeNode(svg);
+            const distance = offset < 0 ? Number.POSITIVE_INFINITY : Math.abs(offset - caretOffset);
+            if (distance < bestDistance) {
+                best = svg;
+                bestDistance = distance;
+            }
+        });
+        return best;
+    }
+
+    function plainOffsetBeforeNode(targetNode) {
+        if (!targetNode || !editor.contains(targetNode)) {
+            return -1;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        range.setEndBefore(targetNode);
+        return extractTextWithLineBreaks(range.cloneContents()).replace(/\r\n|\r/g, '\n').length;
+    }
+
     function replaceImagesInSelectionWithButtons() {
         const selection = window.getSelection();
         const range = selection && selection.rangeCount ? selection.getRangeAt(0) : savedEditorRange;
@@ -2354,6 +2645,8 @@
                 commands: [
                     ['insertTextAtIndex("3.7", "text")', 'Insert text at an explicit index.'],
                     ['inserText("end", "text")', 'Short alias for insertTextAtIndex().'],
+                    ['getIndex()', 'Show the current caret index and copy it to the clipboard.'],
+                    ['readFileContent("file.txt")', 'Read a file through the extension host and return its text.'],
                     ['hl("TODO", 2)', 'Highlight regex matches with search-bar color id 1..7.'],
                     ['sub("foo", "bar", "i", 3, 8)', 'Regex substitution, optionally constrained to inclusive line numbers. Use "s" for case-sensitive.'],
                     ['fsub(2, "foo", "bar", "s", 3, 8)', 'Substitute only inside spans highlighted with color id 2.'],
@@ -2361,6 +2654,15 @@
                     ['camel, snake, kebab', 'Convert selected text case.'],
                     ['mdrender()', 'Render Markdown in the editor.'],
                     ['incrint("-?\\\\d+", 1)', 'Increment integers inside regex matches.']
+                ]
+            },
+            {
+                title: 'SVG And Graphics',
+                commands: [
+                    ['insertSvg()', 'Open an SVG file and insert it inline at the current editor caret.'],
+                    ['insertSvgCode("2.3", svgText)', 'Insert inline SVG markup at an explicit index.'],
+                    ['insertSvgFile("2.3", "diagram.svg")', 'Read an SVG file through the extension host and insert it at an explicit index.'],
+                    ['moveSvg("2.3")', 'Move the SVG containing or nearest the caret to line 2, character offset 3.']
                 ]
             }
         ];
@@ -2413,7 +2715,9 @@
             'Ctrl+b            Toggle all toolbars',
             'Render MD         Convert editor Markdown into rich HTML',
             'Copy MD           Copy selection/editor as Markdown',
+            '+ SVG             Insert an inline SVG file at the caret',
             'JS Cmd            Run JavaScript command in webview',
+            'getIndex()        Show and copy current caret index',
             'cmdhelp           Show command reference',
             'Incr Int          Increment integers inside regex matches',
             'Ctrl+1..7         Send selection to regex search box',
@@ -3589,6 +3893,86 @@
         range.setStart(position.node, position.offset);
         range.collapse(true);
         return range;
+    }
+
+    function indexFromTextOffset(text, offset) {
+        const source = String(text || '').replace(/\r\n|\r/g, '\n');
+        const safeOffset = Math.max(0, Math.min(Number.parseInt(offset, 10) || 0, source.length));
+        const before = source.slice(0, safeOffset);
+        const line = before.split('\n').length;
+        const lastNewline = before.lastIndexOf('\n');
+        const charOffset = lastNewline < 0 ? before.length : before.length - lastNewline - 1;
+        return `${line}.${charOffset}`;
+    }
+
+    function currentCaretIndex() {
+        const range = getEditorSelectionRange();
+        if (!range || !editor.contains(range.commonAncestorContainer)) {
+            return null;
+        }
+        return indexFromTextOffset(getPlainTextForIndexing(), indexPlainOffsetForRangeStart(range));
+    }
+
+    function indexPlainOffsetForRangeStart(range) {
+        const before = document.createRange();
+        before.selectNodeContents(editor);
+        before.setEnd(range.startContainer, range.startOffset);
+        const fragment = before.cloneContents();
+        const holder = document.createElement('div');
+        holder.appendChild(fragment);
+        removeLineNumbers(holder);
+        holder.querySelectorAll('.cursor, .cursor-marker').forEach(span => span.remove());
+        return extractTextWithLineBreaks(holder).replace(/\r\n|\r/g, '\n').length;
+    }
+
+    function showIndexPopup(index) {
+        const existing = document.getElementById('get-index-popup');
+        if (existing) {
+            existing.remove();
+        }
+
+        const popup = document.createElement('div');
+        popup.id = 'get-index-popup';
+        popup.className = 'text-popup';
+
+        const header = document.createElement('div');
+        header.className = 'text-popup-header';
+        const title = document.createElement('strong');
+        title.textContent = 'Caret Index';
+        const closeButton = document.createElement('button');
+        closeButton.type = 'button';
+        closeButton.textContent = 'Close';
+        closeButton.addEventListener('click', () => popup.remove());
+        header.append(title, closeButton);
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.readOnly = true;
+        input.value = index;
+        input.style.width = '160px';
+        input.style.fontFamily = 'monospace';
+
+        popup.append(header, input);
+        document.body.appendChild(popup);
+        input.focus();
+        input.select();
+    }
+
+    async function getIndex() {
+        const index = currentCaretIndex();
+        if (!index) {
+            setStatus('No editor caret position available.');
+            return null;
+        }
+
+        showIndexPopup(index);
+        try {
+            await navigator.clipboard.writeText(index);
+            setStatus(`Copied caret index: ${index}`);
+        } catch (error) {
+            setStatus(`Caret index: ${index} (clipboard copy failed: ${error.message})`);
+        }
+        return index;
     }
 
     function getPlainTextForIndexing() {
@@ -5469,8 +5853,31 @@
         return { html: cleaned, removed };
     }
 
+    function protectSvgBlocksForStringProcessing(html) {
+        const holder = document.createElement('div');
+        holder.innerHTML = String(html || '');
+        const svgBlocks = [];
+
+        holder.querySelectorAll('svg').forEach((svg, index) => {
+            const token = `SPECTRAL_SVG_PLACEHOLDER_${index}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            svgBlocks.push({ token, html: svg.outerHTML });
+            svg.replaceWith(document.createTextNode(token));
+        });
+
+        return { html: holder.innerHTML, svgBlocks };
+    }
+
+    function restoreSvgBlocksAfterStringProcessing(html, svgBlocks) {
+        let restored = String(html || '');
+        svgBlocks.forEach(({ token, html: svgHtml }) => {
+            restored = restored.split(token).join(svgHtml);
+        });
+        return restored;
+    }
+
     function postProcessForEmail(html) {
-        const lines = String(html || '').split(/(<[A-Za-z][^>]*>)|(\n)/i);
+        const protectedHtml = protectSvgBlocksForStringProcessing(html);
+        const lines = protectedHtml.html.split(/(<[A-Za-z][^>]*>)|(\n)/i);
         let output = '';
 
         lines.forEach(part => {
@@ -5486,7 +5893,7 @@
             }
         });
 
-        return output;
+        return restoreSvgBlocksAfterStringProcessing(output, protectedHtml.svgBlocks);
     }
 
     function showMultiRegexHighlightPopup() {
@@ -5923,7 +6330,8 @@
         matches.slice().reverse().forEach(match => {
             const span = wrapTextRange(match.node, match.start, match.end, color, {
                 className: colid ? `highlight${colid}` : 'highlight',
-                id: match.resultId
+                id: match.resultId,
+                colid
             });
             if (span && shouldShowResults) {
                 span.setAttribute('data-spectral-search-result', '1');
@@ -6074,7 +6482,159 @@
         return matches;
     }
 
+    function isSvgTextNode(node) {
+        return node &&
+            node.nodeType === Node.TEXT_NODE &&
+            node.parentNode &&
+            node.parentNode.namespaceURI === 'http://www.w3.org/2000/svg';
+    }
+
+    function fontSizeFromChooserValue(value) {
+        switch (String(value || '')) {
+            case '1': return 'x-small';
+            case '3': return 'medium';
+            case '5': return 'x-large';
+            case '7': return 'xx-large';
+            default: return 'medium';
+        }
+    }
+
+    function highlightToolbarStyles() {
+        const styles = {};
+        const font = document.getElementById('fontChooser')?.value;
+        const size = document.getElementById('sizeChooser')?.value;
+        if (font && font !== 'No Selection') {
+            styles.fontFamily = font;
+        }
+        if (size && size !== '0') {
+            styles.fontSize = fontSizeFromChooserValue(size);
+        }
+        return styles;
+    }
+
+    function applyStyleToSvgSelectionIfNeeded(styles) {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount || selection.isCollapsed) {
+            return false;
+        }
+
+        const ranges = [];
+        for (let index = 0; index < selection.rangeCount; index += 1) {
+            const range = selection.getRangeAt(index);
+            if (editor.contains(range.commonAncestorContainer) && rangeIntersectsSvgText(range)) {
+                ranges.push(range.cloneRange());
+            }
+        }
+        if (!ranges.length) {
+            return false;
+        }
+
+        const changed = [];
+        ranges.forEach(range => {
+            svgTextRangeParts(range)
+                .sort((a, b) => {
+                    if (a.node === b.node) {
+                        return b.start - a.start;
+                    }
+                    return a.node.compareDocumentPosition(b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? 1 : -1;
+                })
+                .forEach(part => {
+                    const tspan = createSvgTextHighlight(part.node, part.start, part.end, '', {
+                        highlight: false,
+                        styles
+                    });
+                    if (tspan) {
+                        changed.push(tspan);
+                    }
+                });
+        });
+
+        if (changed.length) {
+            const after = document.createRange();
+            after.setStartAfter(changed[changed.length - 1]);
+            after.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(after);
+            savedEditorRange = after.cloneRange();
+            hydrateEditorControls(editor);
+            setStatus(`Styled ${changed.length} SVG text segment${changed.length === 1 ? '' : 's'}.`);
+        }
+        return true;
+    }
+
+    function createSvgTextHighlight(textNode, start, end, color, options = {}) {
+        const styles = Object.assign({}, highlightToolbarStyles(), options.styles || {});
+        const text = textNode.textContent || '';
+        const safeStart = Math.max(0, Math.min(start, text.length));
+        const safeEnd = Math.max(safeStart, Math.min(end, text.length));
+        if (safeStart === safeEnd) {
+            return null;
+        }
+
+        const before = text.slice(0, safeStart);
+        const mid = text.slice(safeStart, safeEnd);
+        const after = text.slice(safeEnd);
+        const parent = textNode.parentNode;
+        if (!parent) {
+            return null;
+        }
+
+        const fragment = document.createDocumentFragment();
+        if (before) {
+            fragment.appendChild(document.createTextNode(before));
+        }
+
+        const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+        tspan.textContent = mid;
+        if (options.highlight !== false) {
+            tspan.setAttribute('data-spectral-svg-hl', '1');
+        }
+        if (options.className) {
+            tspan.setAttribute('class', options.className);
+        }
+        if (options.id) {
+            tspan.id = options.id;
+        }
+        if (options.colid != null) {
+            tspan.setAttribute('data-hl-colid', String(options.colid));
+        }
+        if (color) {
+            tspan.setAttribute('data-hl-color', color);
+            tspan.setAttribute('stroke', color);
+        }
+
+        const fill = parent instanceof Element ? getComputedStyle(parent).fill : '';
+        if (fill && fill !== 'none') {
+            tspan.setAttribute('fill', fill);
+        }
+        if (styles.color) {
+            tspan.setAttribute('fill', styles.color);
+        }
+        if (styles.fontFamily) {
+            tspan.setAttribute('font-family', styles.fontFamily);
+        }
+        if (styles.fontSize) {
+            tspan.setAttribute('font-size', styles.fontSize);
+        }
+        if (color) {
+            tspan.setAttribute('paint-order', 'stroke');
+            tspan.setAttribute('stroke-width', '4px');
+            tspan.setAttribute('stroke-linejoin', 'round');
+        }
+
+        fragment.appendChild(tspan);
+        if (after) {
+            fragment.appendChild(document.createTextNode(after));
+        }
+        parent.replaceChild(fragment, textNode);
+        return tspan;
+    }
+
     function wrapTextRange(textNode, start, end, color, options = {}) {
+        if (isSvgTextNode(textNode)) {
+            return createSvgTextHighlight(textNode, start, end, color, options);
+        }
+
         const range = document.createRange();
         range.setStart(textNode, start);
         range.setEnd(textNode, end);
@@ -6087,8 +6647,185 @@
             span.id = options.id;
         }
         span.style.backgroundColor = color;
+        Object.assign(span.style, highlightToolbarStyles(), options.styles || {});
         range.surroundContents(span);
         return span;
+    }
+
+    function highlightSelectionIfNeeded(color, colid = null) {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount || selection.isCollapsed) {
+            return false;
+        }
+
+        const parts = [];
+        for (let index = 0; index < selection.rangeCount; index += 1) {
+            const range = selection.getRangeAt(index);
+            if (editor.contains(range.commonAncestorContainer)) {
+                parts.push(...textRangeParts(range));
+            }
+        }
+        if (!parts.length) {
+            return false;
+        }
+
+        const highlighted = [];
+        parts
+            .sort((a, b) => {
+                if (a.node === b.node) {
+                    return b.start - a.start;
+                }
+                return a.node.compareDocumentPosition(b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? 1 : -1;
+            })
+            .forEach(part => {
+                const wrapped = wrapTextRange(part.node, part.start, part.end, color, {
+                    className: colid ? `highlight${colid}` : 'highlight',
+                    colid
+                });
+                if (wrapped) {
+                    highlighted.push(wrapped);
+                }
+            });
+
+        if (highlighted.length) {
+            const after = document.createRange();
+            after.setStartAfter(highlighted[highlighted.length - 1]);
+            after.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(after);
+            savedEditorRange = after.cloneRange();
+            hydrateEditorControls(editor);
+            setStatus(`Highlighted ${highlighted.length} text segment${highlighted.length === 1 ? '' : 's'}.`);
+        }
+        return true;
+    }
+
+    function highlightSvgSelectionIfNeeded(color, colid = null) {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount || selection.isCollapsed) {
+            return false;
+        }
+
+        const ranges = [];
+        for (let index = 0; index < selection.rangeCount; index += 1) {
+            const range = selection.getRangeAt(index);
+            if (editor.contains(range.commonAncestorContainer) && rangeIntersectsSvgText(range)) {
+                ranges.push(range.cloneRange());
+            }
+        }
+        if (!ranges.length) {
+            return false;
+        }
+
+        const highlighted = [];
+        ranges.forEach(range => {
+            svgTextRangeParts(range)
+                .sort((a, b) => {
+                    if (a.node === b.node) {
+                        return b.start - a.start;
+                    }
+                    return a.node.compareDocumentPosition(b.node) & Node.DOCUMENT_POSITION_FOLLOWING ? 1 : -1;
+                })
+                .forEach(part => {
+                    const tspan = createSvgTextHighlight(part.node, part.start, part.end, color, {
+                        className: colid ? `highlight${colid}` : 'highlight',
+                        colid
+                    });
+                    if (tspan) {
+                        highlighted.push(tspan);
+                    }
+                });
+        });
+
+        if (highlighted.length) {
+            const after = document.createRange();
+            after.setStartAfter(highlighted[highlighted.length - 1]);
+            after.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(after);
+            savedEditorRange = after.cloneRange();
+            hydrateEditorControls(editor);
+            setStatus(`Highlighted ${highlighted.length} SVG text segment${highlighted.length === 1 ? '' : 's'}.`);
+        }
+        return true;
+    }
+
+    function textRangeParts(range) {
+        const parts = [];
+        const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                if (!node.nodeValue) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                const parent = node.parentElement;
+                if (!parent || parent.closest('button, textarea, #textPopup')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                try {
+                    return range.intersectsNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+                } catch (_) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+            }
+        });
+
+        let node = walker.nextNode();
+        while (node) {
+            const length = node.nodeValue.length;
+            let start = 0;
+            let end = length;
+            if (node === range.startContainer) {
+                start = Math.max(0, Math.min(range.startOffset, length));
+            }
+            if (node === range.endContainer) {
+                end = Math.max(start, Math.min(range.endOffset, length));
+            }
+            if (start < end) {
+                parts.push({ node, start, end });
+            }
+            node = walker.nextNode();
+        }
+
+        return parts;
+    }
+
+    function rangeIntersectsSvgText(range) {
+        return svgTextRangeParts(range).length > 0;
+    }
+
+    function svgTextRangeParts(range) {
+        const parts = [];
+        const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                if (!isSvgTextNode(node) || !node.nodeValue) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                try {
+                    return range.intersectsNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+                } catch (_) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+            }
+        });
+
+        let node = walker.nextNode();
+        while (node) {
+            const length = node.nodeValue.length;
+            let start = 0;
+            let end = length;
+            if (node === range.startContainer) {
+                start = Math.max(0, Math.min(range.startOffset, length));
+            }
+            if (node === range.endContainer) {
+                end = Math.max(start, Math.min(range.endOffset, length));
+            }
+            if (start < end) {
+                parts.push({ node, start, end });
+            }
+            node = walker.nextNode();
+        }
+
+        return parts;
     }
 
     function isWordBoundary(text, index) {
@@ -6099,12 +6836,29 @@
     }
 
     function randomHilightColor() {
-        const letters = 'BCDEF';
-        let color = '#';
-        for (let i = 0; i < 6; i += 1) {
-            color += letters.charAt(Math.floor(Math.random() * letters.length));
+        const h = 6.0 * Math.random();
+        const i = Math.min(5, Math.floor(h));
+        const f = h - i;
+        const s = 0.32 + 0.23 * Math.random();
+        const v = 0.94 + 0.06 * Math.random();
+        const p = v * (1.0 - s);
+        const q = v * (1.0 - s * f);
+        const t = v * (1.0 - s * (1.0 - f));
+        let r;
+        let g;
+        let b;
+
+        switch (i) {
+            case 0: r = v; g = t; b = p; break;
+            case 1: r = q; g = v; b = p; break;
+            case 2: r = p; g = v; b = t; break;
+            case 3: r = p; g = q; b = v; break;
+            case 4: r = t; g = p; b = v; break;
+            default: r = v; g = p; b = q; break;
         }
-        return color;
+
+        const toHex = value => Math.floor(255 * value).toString(16).padStart(2, '0');
+        return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
     }
 
     function colorForHighlighter(colid) {
@@ -6240,6 +6994,12 @@
         insertTextAtIndex,
         insertText,
         inserText,
+        getIndex,
+        insertSvg,
+        insertSvgCode,
+        insertSvgFile,
+        readFileContent,
+        moveSvg,
         createNote,
         addCursorAtIndex,
         selectRangeByIndex,

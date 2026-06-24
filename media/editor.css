@@ -482,6 +482,11 @@ abbrev {
     background: #000000;
 }
 
+.editor svg {
+    max-width: 100%;
+    height: auto;
+}
+
 .help-popup {
     display: none;
     position: fixed;
