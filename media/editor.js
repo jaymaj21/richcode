@@ -2647,6 +2647,8 @@
                     ['inserText("end", "text")', 'Short alias for insertTextAtIndex().'],
                     ['getIndex()', 'Show the current caret index and copy it to the clipboard.'],
                     ['readFileContent("file.txt")', 'Read a file through the extension host and return its text.'],
+                    ['processTextInput("Title", "Prompt", callback)', 'Show a multiline text input dialog and invoke callback(text).'],
+                    ['processMultipleStringInputs("Title", ["a", "b"], callback)', 'Show named text fields and invoke callback(a, b).'],
                     ['hl("TODO", 2)', 'Highlight regex matches with search-bar color id 1..7.'],
                     ['sub("foo", "bar", "i", 3, 8)', 'Regex substitution, optionally constrained to inclusive line numbers. Use "s" for case-sensitive.'],
                     ['fsub(2, "foo", "bar", "s", 3, 8)', 'Substitute only inside spans highlighted with color id 2.'],
@@ -2654,6 +2656,15 @@
                     ['camel, snake, kebab', 'Convert selected text case.'],
                     ['mdrender()', 'Render Markdown in the editor.'],
                     ['incrint("-?\\\\d+", 1)', 'Increment integers inside regex matches.']
+                ]
+            },
+            {
+                title: 'Input Dialogs',
+                commands: [
+                    ['processTextInput("Insert Text", "Text", text => Spectral.inserText("end", text))', 'Show a multiline text area and pass its text to the callback.'],
+                    ['processStringInput("Go To", "Index", index => selectRangeByIndex(index, index))', 'Show a single-line text input and pass the entered value to the callback.'],
+                    ['processMultipleStringInputs("Create Note", ["index", "text", "label"], (index, text, label) => Spectral.createNote(index, text, label))', 'Show several named inputs and pass values positionally to the callback.'],
+                    ['await processTextInput("Text", "Text", text => console.log(text))', 'The dialog helpers also return a Promise resolving to entered values, or null on Cancel.']
                 ]
             },
             {
@@ -4842,6 +4853,122 @@
         scheduleSend();
     }
 
+    function resolveInputDialogCallback(callback) {
+        if (typeof callback === 'function') return callback;
+        if (typeof callback === 'string' && typeof window[callback] === 'function') return window[callback];
+        return null;
+    }
+
+    function normalizeInputDialogFields(fields, defaultMultiline = false) {
+        return (Array.isArray(fields) ? fields : [fields]).map(field => {
+            if (typeof field === 'string') {
+                return {
+                    name: field,
+                    label: field,
+                    multiline: defaultMultiline,
+                    value: ''
+                };
+            }
+            const name = String(field?.name || field?.label || 'input');
+            return {
+                name,
+                label: String(field?.label || name),
+                multiline: Boolean(field?.multiline ?? field?.textarea ?? defaultMultiline),
+                value: String(field?.value ?? field?.initialText ?? ''),
+                rows: Number.parseInt(field?.rows, 10) || 8
+            };
+        });
+    }
+
+    function showInputDialog(title, fields, callback = null, options = {}) {
+        const existing = document.getElementById('input-popup-modal');
+        if (existing) existing.remove();
+
+        const fieldSpecs = normalizeInputDialogFields(fields, Boolean(options.multiline));
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.id = 'input-popup-modal';
+            overlay.className = 'input-popup-overlay';
+
+            const modal = document.createElement('div');
+            modal.className = 'input-popup-modal';
+
+            const heading = document.createElement('h3');
+            heading.textContent = title || 'Input';
+            modal.appendChild(heading);
+
+            const form = document.createElement('form');
+            const controls = new Map();
+
+            fieldSpecs.forEach(field => {
+                const label = document.createElement('label');
+                label.textContent = `${field.label}:`;
+                label.htmlFor = `input-popup-${field.name}`;
+
+                const input = field.multiline ? document.createElement('textarea') : document.createElement('input');
+                if (!field.multiline) input.type = 'text';
+                input.id = `input-popup-${field.name}`;
+                input.name = field.name;
+                input.value = field.value || '';
+                if (field.multiline) {
+                    input.rows = field.rows || 8;
+                }
+
+                controls.set(field.name, input);
+                form.appendChild(label);
+                form.appendChild(input);
+            });
+
+            form.addEventListener('submit', event => {
+                event.preventDefault();
+                const values = fieldSpecs.map(field => controls.get(field.name).value);
+                overlay.remove();
+                const fn = resolveInputDialogCallback(callback);
+                if (fn) fn(...values);
+                resolve(values);
+            });
+
+            const actions = document.createElement('div');
+            actions.className = 'input-popup-actions';
+
+            const okButton = document.createElement('button');
+            okButton.type = 'submit';
+            okButton.textContent = 'OK';
+
+            const cancelButton = document.createElement('button');
+            cancelButton.type = 'button';
+            cancelButton.textContent = 'Cancel';
+            cancelButton.addEventListener('click', () => {
+                overlay.remove();
+                resolve(null);
+            });
+
+            actions.appendChild(okButton);
+            actions.appendChild(cancelButton);
+            form.appendChild(actions);
+            modal.appendChild(form);
+            overlay.appendChild(modal);
+            document.body.appendChild(overlay);
+
+            const first = form.querySelector('input,textarea');
+            if (first) first.focus();
+        });
+    }
+
+    function processStringInput(title, prompt, callback, initialText = '') {
+        return showInputDialog(title, [{ name: prompt, label: prompt, multiline: false, value: initialText }], callback)
+            .then(values => values ? values[0] : null);
+    }
+
+    function processTextInput(title, prompt, callback, initialText = '') {
+        return showInputDialog(title, [{ name: prompt, label: prompt, multiline: true, value: initialText, rows: 12 }], callback)
+            .then(values => values ? values[0] : null);
+    }
+
+    function processMultipleStringInputs(title, prompts, callback) {
+        return showInputDialog(title, normalizeInputDialogFields(prompts, false), callback);
+    }
+
     function closeTextPopup() {
         ensureTextPopup();
         textPopup.style.display = 'none';
@@ -7025,6 +7152,10 @@
         hideCmd,
         cmdhelp,
         showTextPopup,
+        showInputDialog,
+        processStringInput,
+        processTextInput,
+        processMultipleStringInputs,
         getPlainText: getPlainTextForIndexing,
         getEditorHtml: () => editor.innerHTML,
         setEditorHtml: html => {
