@@ -11,6 +11,8 @@
     let textPopup = null;
     let popupHeading = null;
     let popupTextarea = null;
+    let textPopupOkButton = null;
+    let textPopupCloseButton = null;
     let textPopupCallback = null;
     let activeNoteButton = null;
     let lastTargetId = null;
@@ -47,6 +49,7 @@
     let diffNotesGranularity = null;
     let diffNotesPickState = null;
     let diffContext = null;
+    let suppressNextCommandKeyup = false;
     const jsCommandHistory = [];
     const pluginCommands = new Map();
     const pendingSvgFileReads = new Map();
@@ -410,6 +413,9 @@
             showNoteInputPopup();
         } else if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'q') {
             event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            suppressNextCommandKeyup = true;
             showJsCommandPopup();
         } else if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'l') {
             event.preventDefault();
@@ -436,7 +442,16 @@
         } else if (cursors.length > 0 && !event.ctrlKey && !event.metaKey && event.target.closest('#editor')) {
             handleCursorKeydown(event);
         }
-    });
+    }, true);
+
+    document.addEventListener('keyup', event => {
+        if (suppressNextCommandKeyup && event.key.toLowerCase() === 'q') {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            suppressNextCommandKeyup = false;
+        }
+    }, true);
 
     window.addEventListener('message', event => {
         const message = event.data;
@@ -470,7 +485,23 @@
         jsCommandInput.value = '';
         jsCommandHistoryIndex = jsCommandHistory.length;
         jsCommandPopup.style.display = 'flex';
-        jsCommandInput.focus();
+        focusJsCommandInput();
+    }
+
+    function focusJsCommandInput() {
+        if (!jsCommandInput) {
+            return;
+        }
+        jsCommandInput.focus({ preventScroll: true });
+        jsCommandInput.select();
+        window.requestAnimationFrame(() => {
+            jsCommandInput.focus({ preventScroll: true });
+            jsCommandInput.select();
+        });
+        window.setTimeout(() => {
+            jsCommandInput.focus({ preventScroll: true });
+            jsCommandInput.select();
+        }, 0);
     }
 
     function hideJsCommandPopup() {
@@ -1169,6 +1200,27 @@
             return savedEditorRange.cloneRange();
         }
         return null;
+    }
+
+    function getNonCollapsedEditorSelectionRange() {
+        const range = getEditorSelectionRange();
+        return range && !range.collapsed ? range.cloneRange() : null;
+    }
+
+    function getEditorSelectionText() {
+        const range = getNonCollapsedEditorSelectionRange();
+        if (!range) return null;
+        const container = document.createElement('div');
+        container.appendChild(range.cloneContents());
+        return cleanEditorSelectionText(extractTextWithLineBreaks(container));
+    }
+
+    function getEditorSelectionHtml() {
+        const range = getNonCollapsedEditorSelectionRange();
+        if (!range) return null;
+        const container = document.createElement('div');
+        container.appendChild(range.cloneContents());
+        return container.innerHTML;
     }
 
     function toggleCursorInsertMode() {
@@ -2646,6 +2698,9 @@
                     ['insertTextAtIndex("3.7", "text")', 'Insert text at an explicit index.'],
                     ['inserText("end", "text")', 'Short alias for insertTextAtIndex().'],
                     ['getIndex()', 'Show the current caret index and copy it to the clipboard.'],
+                    ['getEditorSelectionText()', 'Return selected editor text, or null when there is no saved/live selection.'],
+                    ['getEditorSelectionHtml()', 'Return selected editor HTML, or null when there is no saved/live selection.'],
+                    ['showTextPopup(getEditorSelectionText())', 'Show text in a searchable read-only popup with a Close button.'],
                     ['readFileContent("file.txt")', 'Read a file through the extension host and return its text.'],
                     ['processTextInput("Title", "Prompt", callback)', 'Show a multiline text input dialog and invoke callback(text).'],
                     ['processMultipleStringInputs("Title", ["a", "b"], callback)', 'Show named text fields and invoke callback(a, b).'],
@@ -4832,10 +4887,20 @@
     }
 
     function showTextPopup(callback, heading, initialText) {
+        const outputMode = typeof callback !== 'function';
+        if (typeof callback !== 'function') {
+            initialText = callback == null ? '' : String(callback);
+            heading = heading || 'Text';
+            callback = null;
+        }
+
         ensureTextPopup();
         textPopupCallback = callback;
         popupHeading.textContent = heading || '';
         popupTextarea.value = initialText || '';
+        popupTextarea.readOnly = outputMode;
+        if (textPopupOkButton) textPopupOkButton.style.display = outputMode ? 'none' : '';
+        if (textPopupCloseButton) textPopupCloseButton.textContent = outputMode ? 'Close' : 'Cancel';
         textPopup.style.display = 'block';
         ensurePopupTextSearchControls(textPopup, popupTextarea, popupTextarea);
         popupTextarea.focus();
@@ -4844,9 +4909,10 @@
     function submitTextPopup() {
         ensureTextPopup();
         const text = popupTextarea.value;
+        const callback = textPopupCallback;
         closeTextPopup();
-        if (typeof textPopupCallback === 'function') {
-            textPopupCallback(text);
+        if (typeof callback === 'function') {
+            callback(text);
         }
         textPopupCallback = null;
         activeNoteButton = null;
@@ -4972,6 +5038,10 @@
     function closeTextPopup() {
         ensureTextPopup();
         textPopup.style.display = 'none';
+        popupTextarea.readOnly = false;
+        if (textPopupOkButton) textPopupOkButton.style.display = '';
+        if (textPopupCloseButton) textPopupCloseButton.textContent = 'Cancel';
+        textPopupCallback = null;
     }
 
     function showNoteInputPopup() {
@@ -5283,18 +5353,18 @@
         const actions = document.createElement('div');
         actions.className = 'text-popup-actions';
 
-        const okButton = document.createElement('button');
-        okButton.type = 'button';
-        okButton.textContent = 'OK';
-        okButton.addEventListener('click', submitTextPopup);
+        textPopupOkButton = document.createElement('button');
+        textPopupOkButton.type = 'button';
+        textPopupOkButton.textContent = 'OK';
+        textPopupOkButton.addEventListener('click', submitTextPopup);
 
-        const cancelButton = document.createElement('button');
-        cancelButton.type = 'button';
-        cancelButton.textContent = 'Cancel';
-        cancelButton.addEventListener('click', closeTextPopup);
+        textPopupCloseButton = document.createElement('button');
+        textPopupCloseButton.type = 'button';
+        textPopupCloseButton.textContent = 'Cancel';
+        textPopupCloseButton.addEventListener('click', closeTextPopup);
 
-        actions.appendChild(okButton);
-        actions.appendChild(cancelButton);
+        actions.appendChild(textPopupOkButton);
+        actions.appendChild(textPopupCloseButton);
         textPopup.appendChild(actions);
         document.body.appendChild(textPopup);
     }
@@ -7043,6 +7113,15 @@
             .trim();
     }
 
+    function cleanEditorSelectionText(text) {
+        return String(text || '')
+            .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
+            .replace(/\r\n|\r/g, '\n')
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .replace(/^\n+|\n+$/g, '');
+    }
+
     function textToSpectralHtml(text) {
         return escapeHtml(text)
             .replace(/\r\n/g, '<br/>')
@@ -7118,6 +7197,8 @@
         setStatus,
         scheduleSend,
         hydrateEditorControls,
+        getEditorSelectionText,
+        getEditorSelectionHtml,
         insertTextAtIndex,
         insertText,
         inserText,
