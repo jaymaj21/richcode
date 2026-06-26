@@ -54,6 +54,7 @@
     const pluginCommands = new Map();
     const pendingSvgFileReads = new Map();
     const pendingFileContentReads = new Map();
+    const pendingPlantUmlRenders = new Map();
     let jsCommandHistoryIndex = -1;
 
     editor.innerHTML = initialState.initialEditorHtml || '';
@@ -464,6 +465,8 @@
             handleSvgFileReadResult(message);
         } else if (message.type === 'fileContentReadResult') {
             handleFileContentReadResult(message);
+        } else if (message.type === 'plantUmlSvgResult') {
+            handlePlantUmlSvgResult(message);
         }
     });
 
@@ -2338,6 +2341,38 @@
         }
     }
 
+    function renderPlantUmlSvg(options = {}) {
+        const requestId = `plantuml_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        return new Promise((resolve, reject) => {
+            const timeout = window.setTimeout(() => {
+                pendingPlantUmlRenders.delete(requestId);
+                reject(new Error('Timed out waiting for PlantUML render.'));
+            }, 45000);
+
+            pendingPlantUmlRenders.set(requestId, { resolve, reject, timeout });
+            vscode.postMessage({
+                type: 'renderPlantUmlSvg',
+                requestId,
+                filename: options && options.filename ? String(options.filename) : '',
+                source: options && options.source ? String(options.source) : ''
+            });
+        });
+    }
+
+    function handlePlantUmlSvgResult(message) {
+        const pending = pendingPlantUmlRenders.get(message.requestId);
+        if (!pending) {
+            return;
+        }
+        pendingPlantUmlRenders.delete(message.requestId);
+        window.clearTimeout(pending.timeout);
+        if (message.ok) {
+            pending.resolve(String(message.svg || ''));
+        } else {
+            pending.reject(new Error(message.error || 'PlantUML render failed.'));
+        }
+    }
+
     function ensureSvgFileInput() {
         if (svgFileInput) {
             return;
@@ -2728,7 +2763,8 @@
                     ['insertSvg()', 'Open an SVG file and insert it inline at the current editor caret.'],
                     ['insertSvgCode("2.3", svgText)', 'Insert inline SVG markup at an explicit index.'],
                     ['insertSvgFile("2.3", "diagram.svg")', 'Read an SVG file through the extension host and insert it at an explicit index.'],
-                    ['moveSvg("2.3")', 'Move the SVG containing or nearest the caret to line 2, character offset 3.']
+                    ['moveSvg("2.3")', 'Move the SVG containing or nearest the caret to line 2, character offset 3.'],
+                    ['plantuml("diagram.puml")', 'Plugin command: render a PlantUML file, selection, or prompted text to inline SVG.']
                 ]
             }
         ];
@@ -7203,10 +7239,12 @@
         insertText,
         inserText,
         getIndex,
+        getCurrentIndex: currentCaretIndex,
         insertSvg,
         insertSvgCode,
         insertSvgFile,
         readFileContent,
+        renderPlantUmlSvg,
         moveSvg,
         createNote,
         addCursorAtIndex,
