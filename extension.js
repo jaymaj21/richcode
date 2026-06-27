@@ -1,5 +1,8 @@
 const vscode = require('vscode');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFile } = require('child_process');
 
 const VIEW_TYPE = 'spectralweb.richEditor';
 
@@ -81,6 +84,21 @@ class SpectralWebEditorProvider {
             if (message.type === 'saveAll') {
                 await this.applyWebviewChange(document, message);
                 await this.saveDocumentAndRichLayer(document);
+                return;
+            }
+
+            if (message.type === 'readSvgFile') {
+                await this.handleReadSvgFile(webviewPanel.webview, document, message);
+                return;
+            }
+
+            if (message.type === 'readFileContent') {
+                await this.handleReadFileContent(webviewPanel.webview, document, message);
+                return;
+            }
+
+            if (message.type === 'renderPlantUmlSvg') {
+                await this.handleRenderPlantUmlSvg(webviewPanel.webview, document, message);
                 return;
             }
 
@@ -186,6 +204,137 @@ class SpectralWebEditorProvider {
         return textToSpectralHtml(document.getText());
     }
 
+    async handleReadSvgFile(webview, document, message) {
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        try {
+            const uri = this.resolveSvgFileUri(document, message.filename);
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            const text = Buffer.from(bytes).toString('utf8');
+            await webview.postMessage({
+                type: 'svgFileReadResult',
+                requestId,
+                ok: true,
+                text
+            });
+        } catch (error) {
+            await webview.postMessage({
+                type: 'svgFileReadResult',
+                requestId,
+                ok: false,
+                error: error && error.message ? error.message : String(error)
+            });
+        }
+    }
+
+    async handleReadFileContent(webview, document, message) {
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        try {
+            const uri = this.resolveFileUri(document, message.filename);
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            const text = Buffer.from(bytes).toString('utf8');
+            await webview.postMessage({
+                type: 'fileContentReadResult',
+                requestId,
+                ok: true,
+                text
+            });
+        } catch (error) {
+            await webview.postMessage({
+                type: 'fileContentReadResult',
+                requestId,
+                ok: false,
+                error: error && error.message ? error.message : String(error)
+            });
+        }
+    }
+
+    async handleRenderPlantUmlSvg(webview, document, message) {
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        try {
+            const source = await this.resolvePlantUmlSource(document, message);
+            const svg = await this.renderPlantUmlSourceToSvg(source);
+            await webview.postMessage({
+                type: 'plantUmlSvgResult',
+                requestId,
+                ok: true,
+                svg
+            });
+        } catch (error) {
+            await webview.postMessage({
+                type: 'plantUmlSvgResult',
+                requestId,
+                ok: false,
+                error: error && error.message ? error.message : String(error)
+            });
+        }
+    }
+
+    async resolvePlantUmlSource(document, message) {
+        if (typeof message.source === 'string' && message.source.trim()) {
+            return message.source;
+        }
+        if (typeof message.filename === 'string' && message.filename.trim()) {
+            const uri = this.resolveFileUri(document, message.filename);
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            return Buffer.from(bytes).toString('utf8');
+        }
+        throw new Error('No PlantUML source supplied.');
+    }
+
+    async renderPlantUmlSourceToSvg(source) {
+        const jarPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'plantuml.jar').fsPath;
+        if (!fs.existsSync(jarPath)) {
+            throw new Error(`PlantUML jar not found: ${jarPath}`);
+        }
+
+        const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'spectralweb-plantuml-'));
+        const inputPath = path.join(tempDir, 'diagram.puml');
+        const outputPath = path.join(tempDir, 'diagram.svg');
+        try {
+            await fs.promises.writeFile(inputPath, source, 'utf8');
+            await execFilePromise('java', ['-jar', jarPath, '-tsvg', inputPath], {
+                cwd: tempDir,
+                timeout: 30000,
+                maxBuffer: 20 * 1024 * 1024
+            });
+            const svg = await fs.promises.readFile(outputPath, 'utf8');
+            if (!/<svg[\s>]/i.test(svg)) {
+                throw new Error('PlantUML did not produce SVG output.');
+            }
+            return svg;
+        } finally {
+            await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+        }
+    }
+
+    resolveSvgFileUri(document, filename) {
+        const raw = String(filename || '').trim();
+        if (!raw) {
+            throw new Error('No SVG filename supplied.');
+        }
+        if (!/\.svg$/i.test(raw)) {
+            throw new Error('insertSvgFile only reads .svg files.');
+        }
+        return this.resolveFileUri(document, raw);
+    }
+
+    resolveFileUri(document, filename) {
+        const raw = String(filename || '').trim();
+        if (!raw) {
+            throw new Error('No filename supplied.');
+        }
+        if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('\\\\') || raw.startsWith('/')) {
+            return vscode.Uri.file(raw);
+        }
+        if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) {
+            return vscode.Uri.parse(raw);
+        }
+
+        const baseDir = document.uri.with({ path: dirnamePath(document.uri.path) });
+        const parts = raw.split(/[\\/]+/).filter(Boolean);
+        return vscode.Uri.joinPath(baseDir, ...parts);
+    }
+
     getWebviewHtml(webview, document, initialEditorHtml) {
         const nonce = getNonce();
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'editor.js'));
@@ -227,6 +376,7 @@ class SpectralWebEditorProvider {
         <button type="button" id="iconize-images" title="Replace selected images with reveal buttons">Iconize Images</button>
         <button type="button" id="scale-images" title="Scale selected or nearest image by percent">Scale Images</button>
         <button type="button" id="insert-media-file" title="Embed an audio or video file">+ Media</button>
+        <button type="button" id="insert-svg-file" title="Insert an inline SVG file">+ SVG</button>
         <input type="color" id="editorBgColor" title="Editor Background Color" value="#ffffff">
         <button type="button" id="set-default-font" title="Set default font and size">DF</button>
         <button type="button" id="copy-editor" title="Copy editor content to clipboard">Copy</button>
@@ -351,6 +501,19 @@ function basename(uri) {
     const path = typeof uri === 'string' ? uri : uri.path;
     const index = path.lastIndexOf('/');
     return index >= 0 ? decodeURIComponent(path.slice(index + 1)) : decodeURIComponent(path);
+}
+
+function execFilePromise(file, args, options) {
+    return new Promise((resolve, reject) => {
+        execFile(file, args, options, (error, stdout, stderr) => {
+            if (error) {
+                const detail = String(stderr || stdout || error.message || error).trim();
+                reject(new Error(detail || `Command failed: ${file}`));
+                return;
+            }
+            resolve({ stdout, stderr });
+        });
+    });
 }
 
 function textToSpectralHtml(text) {
