@@ -538,10 +538,12 @@
 
     function evaluateJsCommand(command) {
         const normalizedCommand = command.replace(/\(\s*\)$/, '');
-        const shortcut = command.match(/^(\d*)([yd])$/);
-        if (shortcut) {
-            const count = Number.parseInt(shortcut[1], 10) || 1;
-            return shortcut[2] === 'y' ? yankLinesFromCaret(count) : deleteYankLinesFromCaret(count);
+        const lineShortcut = parseLineCommand(command);
+        if (lineShortcut) {
+            if (lineShortcut.name === 'yy') return yankLinesFromCaret(lineShortcut.count);
+            if (lineShortcut.name === 'dd') return deleteYankLinesFromCaret(lineShortcut.count);
+            if (lineShortcut.name === 'py') return pasteClipboardAfterCurrentLine();
+            if (lineShortcut.name === 'yp') return yankPasteCurrentLine(lineShortcut.count);
         }
 
         const aliases = {
@@ -561,7 +563,15 @@
             media: () => insertMediaFileAtSavedRange(),
             cmdhelp: () => cmdhelp(),
             hideCmd: () => hideCmd(),
+            yy: () => yankLinesFromCaret(1),
+            dd: () => deleteYankLinesFromCaret(1),
+            py: () => pasteClipboardAfterCurrentLine(),
+            yp: () => yankPasteCurrentLine(1),
+            sub: () => showSubstitutePopup(),
+            replace: () => showSubstitutePopup(),
+            hl: () => showHighlightPopup(),
             delete_empty_lines: () => delete_empty_lines(),
+            deleteEmptyLines: () => deleteEmptyLines(),
             block_color: () => block_color(),
             nested_block_color: () => nested_block_color()
         };
@@ -577,6 +587,19 @@
             toEval += '()';
         }
         return eval(toEval);
+    }
+
+    function parseLineCommand(command) {
+        const text = String(command || '').trim();
+        let match = text.match(/^(\d+)([yd])$/);
+        if (match) {
+            return { name: match[2] === 'y' ? 'yy' : 'dd', count: Number.parseInt(match[1], 10) || 1 };
+        }
+        match = text.match(/^(yy|dd|py|yp)(?:\(\s*(\d*)\s*\))?$/);
+        if (!match) {
+            return null;
+        }
+        return { name: match[1], count: Number.parseInt(match[2], 10) || 1 };
     }
 
     function registerPluginCommand(name, fn) {
@@ -2298,9 +2321,13 @@
                     ['cmdhelp()', 'Show this command reference.'],
                     ['hideCmd()', 'Hide the bottom JS command bar.'],
                     ['Spectral.commandNames()', 'List plugin commands registered with Spectral.registerCommand().'],
+                    ['yy, yy(10)', 'Yank/copy the current line or next N lines. Older form 10y also works.'],
+                    ['dd, dd(10)', 'Delete and yank the current line or next N lines. Older form 10d also works.'],
+                    ['py', 'Paste clipboard content at the start of the next line.'],
+                    ['yp, yp(10)', 'Yank current line or next N lines, then paste them after the current line.'],
                     ['clear()', 'Clear temporary highlights.'],
                     ['reflow(60)', 'Rewrap selected text near the requested column.'],
-                    ['delete_empty_lines()', 'Delete whitespace-only editor lines.']
+                    ['deleteEmptyLines()', 'Delete whitespace-only editor lines. Alias: delete_empty_lines().']
                 ]
             },
             {
@@ -2327,6 +2354,9 @@
                 commands: [
                     ['insertTextAtIndex("3.7", "text")', 'Insert text at an explicit index.'],
                     ['inserText("end", "text")', 'Short alias for insertTextAtIndex().'],
+                    ['hl("TODO", 2)', 'Highlight regex matches with search-bar color id 1..7.'],
+                    ['sub("foo", "bar", "i", 3, 8)', 'Regex substitution, optionally constrained to inclusive line numbers. Use "s" for case-sensitive.'],
+                    ['fsub(2, "foo", "bar", "s", 3, 8)', 'Substitute only inside spans highlighted with color id 2.'],
                     ['uc, lc, tc', 'Uppercase, lowercase, or titlecase selected text.'],
                     ['camel, snake, kebab', 'Convert selected text case.'],
                     ['mdrender()', 'Render Markdown in the editor.'],
@@ -3249,6 +3279,60 @@
         hydrateEditorControls(editor);
         setStatus(`Deleted and yanked ${count} line${count === 1 ? '' : 's'}.`);
         scheduleSend();
+    }
+
+    async function yankPasteCurrentLine(count = 1) {
+        const lineCount = Math.max(1, Number.parseInt(count, 10) || 1);
+        await yankLinesFromCaret(lineCount);
+        await pasteClipboardAfterCurrentLine();
+        setStatus(`Yanked and pasted ${lineCount} line${lineCount === 1 ? '' : 's'} after current line.`);
+    }
+
+    async function pasteClipboardAfterCurrentLine() {
+        const selection = window.getSelection();
+        const sourceRange = selection && selection.rangeCount ? selection.getRangeAt(0) : savedEditorRange;
+        if (!sourceRange || !editor.contains(sourceRange.commonAncestorContainer)) {
+            setStatus('No caret line for py.');
+            return;
+        }
+
+        try {
+            const html = await readClipboardHtmlOrImageOrTextAsHtml();
+            if (!html) {
+                setStatus('Clipboard is empty.');
+                return;
+            }
+
+            const plain = getPlainTextForIndexing();
+            const caretOffset = plainOffsetForRangeStart(sourceRange);
+            const lineEnd = plain.indexOf('\n', Math.max(0, caretOffset));
+            const insertOffset = lineEnd < 0 ? plain.length : lineEnd + 1;
+            const position = getTextPositionForPlainOffset(insertOffset);
+            if (!position) {
+                setStatus('Could not locate next line for py.');
+                return;
+            }
+
+            const range = document.createRange();
+            range.setStart(position.node, position.offset);
+            range.collapse(true);
+            const fragment = createFragmentFromHtml(html, range);
+            const lastNode = fragment.lastChild;
+            range.insertNode(fragment);
+            if (lastNode) {
+                range.setStartAfter(lastNode);
+                range.collapse(true);
+                const nextSelection = window.getSelection();
+                nextSelection.removeAllRanges();
+                nextSelection.addRange(range);
+                savedEditorRange = range.cloneRange();
+            }
+            hydrateEditorControls(editor);
+            setStatus('Pasted clipboard at next line.');
+            scheduleSend();
+        } catch (error) {
+            setStatus(`py failed: ${error.message}`);
+        }
     }
 
     function rangeForLineBlockFromCaret(count) {
@@ -4810,6 +4894,326 @@
         scheduleSend();
     }
 
+    function hl(pattern, colid = 1, flags = '') {
+        const caseInsensitive = document.getElementById('caseInsensitive');
+        const oldCaseInsensitive = caseInsensitive?.checked;
+        if (caseInsensitive) caseInsensitive.checked = String(flags || '').includes('i');
+        const count = highlightPattern(pattern, Number.parseInt(colid, 10) || 1, flags);
+        if (caseInsensitive) caseInsensitive.checked = oldCaseInsensitive;
+        setStatus(`hl: highlighted ${count} match${count === 1 ? '' : 'es'}.`);
+        scheduleSend();
+        return count;
+    }
+
+    function showHighlightPopup() {
+        showTextPopup(raw => {
+            const lines = String(raw || '').split(/\r?\n/);
+            const pattern = lines.shift() || '';
+            const colid = (lines.shift() || '1').trim();
+            const flags = (lines.shift() || '').trim();
+            hl(pattern, colid, flags);
+        }, 'Highlight: regex, color id, optional flags', '');
+    }
+
+    function sub(pattern, replacement, flags = '', firstLine = null, lastLine = null) {
+        return substitute(pattern, replacement, flags, firstLine, lastLine);
+    }
+
+    function fsub(colid, pattern, replacement, flags = '', firstLine = null, lastLine = null) {
+        return filteredSubstitute(colid, pattern, replacement, flags, firstLine, lastLine);
+    }
+
+    function showSubstitutePopup() {
+        showTextPopup(raw => {
+            const lines = String(raw || '').split(/\r?\n/);
+            const pattern = lines.shift() || '';
+            const replacement = lines.shift() || '';
+            const flags = (lines.shift() || '').trim();
+            const firstLine = (lines.shift() || '').trim();
+            const lastLine = (lines.shift() || '').trim();
+            substitute(pattern, replacement, flags, firstLine || null, lastLine || null);
+        }, 'Substitute: pattern, replacement, optional flags, first line, last line', '');
+    }
+
+    function substitute(pattern, replacement, flags = '', firstLine = null, lastLine = null) {
+        if (!pattern) {
+            setStatus('sub: pattern is required.');
+            return 0;
+        }
+
+        let regex;
+        try {
+            regex = new RegExp(String(pattern), regexFlagsForSubstitution(flags));
+        } catch (error) {
+            setStatus(`sub: invalid regex: ${error.message}`);
+            return 0;
+        }
+
+        const text = getPlainTextForIndexing();
+        const bounds = lineBoundsForSubstitution(text, firstLine, lastLine);
+        if (!bounds) {
+            setStatus(`sub: invalid line range ${firstLine}, ${lastLine}.`);
+            return 0;
+        }
+
+        let count = 0;
+        const replacements = collectTextNodeSpansInPlainRange(bounds.start, bounds.end)
+            .map(({ node, startOffset, endOffset }) => {
+                const original = node.textContent || '';
+                const slice = original.slice(startOffset, endOffset);
+                regex.lastIndex = 0;
+                const updatedSlice = slice.replace(regex, (...args) => {
+                    count += 1;
+                    return replacementValue(replacement, args);
+                });
+                return {
+                    node,
+                    newText: original.slice(0, startOffset) + updatedSlice + original.slice(endOffset)
+                };
+            });
+        if (!count) {
+            setStatus('sub: no matches.');
+            return 0;
+        }
+
+        replacements.forEach(({ node, newText }) => {
+            node.textContent = newText;
+        });
+        hydrateEditorControls(editor);
+        setStatus(`sub: replaced ${count} match${count === 1 ? '' : 'es'}.`);
+        scheduleSend();
+        return count;
+    }
+
+    function filteredSubstitute(colid, pattern, replacement, flags = '', firstLine = null, lastLine = null) {
+        if (!pattern) {
+            setStatus('fsub: pattern is required.');
+            return 0;
+        }
+        const parsedColid = Number.parseInt(colid, 10);
+        const highlightClass = `highlight${parsedColid}`;
+        if (!/^highlight[1-7]$/.test(highlightClass)) {
+            setStatus(`fsub: invalid color id ${colid}.`);
+            return 0;
+        }
+        const highlightColor = normalizeCssColor(colorForHighlighter(parsedColid));
+
+        let regex;
+        try {
+            regex = new RegExp(String(pattern), regexFlagsForSubstitution(flags));
+        } catch (error) {
+            setStatus(`fsub: invalid regex: ${error.message}`);
+            return 0;
+        }
+
+        const lineRange = parseLineRange(firstLine, lastLine);
+        if (lineRange === null) {
+            setStatus(`fsub: invalid line range ${firstLine}, ${lastLine}.`);
+            return 0;
+        }
+
+        let count = 0;
+        const replacements = collectHighlightedTextNodeSpans(highlightClass, highlightColor, lineRange)
+            .map(({ node, startOffset, endOffset }) => {
+                const original = node.textContent || '';
+                const slice = original.slice(startOffset, endOffset);
+                regex.lastIndex = 0;
+                const updatedSlice = slice.replace(regex, (...args) => {
+                    count += 1;
+                    return replacementValue(replacement, args);
+                });
+                return {
+                    node,
+                    newText: original.slice(0, startOffset) + updatedSlice + original.slice(endOffset)
+                };
+            });
+        if (!count) {
+            setStatus('fsub: no matches.');
+            return 0;
+        }
+
+        replacements.forEach(({ node, newText }) => {
+            node.textContent = newText;
+        });
+        hydrateEditorControls(editor);
+        setStatus(`fsub: replaced ${count} match${count === 1 ? '' : 'es'} inside .${highlightClass}.`);
+        scheduleSend();
+        return count;
+    }
+
+    function regexFlagsForSubstitution(flags) {
+        const flagSet = new Set(String(flags || '').replace(/[gs]/g, '').split('').filter(Boolean));
+        flagSet.add('g');
+        return Array.from(flagSet).join('');
+    }
+
+    function parseLineRange(firstLine, lastLine) {
+        if (firstLine == null || firstLine === '') {
+            return { first: 1, last: Infinity };
+        }
+        const first = Number.parseInt(firstLine, 10);
+        const last = lastLine == null || lastLine === '' ? first : Number.parseInt(lastLine, 10);
+        if (!Number.isFinite(first) || !Number.isFinite(last) || first < 1 || last < first) {
+            return null;
+        }
+        return { first, last };
+    }
+
+    function collectHighlightedTextNodeSpans(highlightClass, highlightColor, lineRange) {
+        const spans = [];
+        const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+            acceptNode(node) {
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    if (node.matches && node.matches('.line-number, .cursor, .cursor-marker, button, textarea, input, select, #textPopup, #findReplaceDialog')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    return node.tagName && node.tagName.toUpperCase() === 'BR'
+                        ? NodeFilter.FILTER_ACCEPT
+                        : NodeFilter.FILTER_SKIP;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        });
+
+        let lineNumber = 1;
+        let node = walker.nextNode();
+        while (node) {
+            if (node.nodeType === Node.ELEMENT_NODE && node.tagName.toUpperCase() === 'BR') {
+                lineNumber += 1;
+            } else if (node.nodeType === Node.TEXT_NODE) {
+                const text = node.textContent || '';
+                let segmentStart = 0;
+                for (let index = 0; index <= text.length; index += 1) {
+                    if (index === text.length || text.charAt(index) === '\n') {
+                        if (lineNumber >= lineRange.first && lineNumber <= lineRange.last) {
+                            const parent = node.parentElement;
+                            if (parent && textNodeIsInHighlighter(parent, highlightClass, highlightColor) && segmentStart < index) {
+                                spans.push({ node, startOffset: segmentStart, endOffset: index });
+                            }
+                        }
+                        if (index < text.length && text.charAt(index) === '\n') {
+                            lineNumber += 1;
+                            segmentStart = index + 1;
+                        }
+                    }
+                }
+            }
+            node = walker.nextNode();
+        }
+        return spans;
+    }
+
+    function textNodeIsInHighlighter(element, highlightClass, highlightColor) {
+        let current = element;
+        while (current && current !== editor) {
+            if (current.classList && current.classList.contains(highlightClass)) {
+                return true;
+            }
+            if (current.nodeType === Node.ELEMENT_NODE) {
+                const inlineColor = normalizeCssColor(current.style && current.style.backgroundColor);
+                if (inlineColor && inlineColor === highlightColor) {
+                    return true;
+                }
+                const computedColor = normalizeCssColor(window.getComputedStyle(current).backgroundColor);
+                if (computedColor && computedColor === highlightColor) {
+                    return true;
+                }
+            }
+            current = current.parentElement;
+        }
+        return false;
+    }
+
+    function normalizeCssColor(color) {
+        const probe = normalizeCssColor.probe || (normalizeCssColor.probe = document.createElement('span'));
+        probe.style.color = '';
+        probe.style.color = String(color || '');
+        if (!probe.style.color) {
+            return '';
+        }
+        document.body.appendChild(probe);
+        const normalized = window.getComputedStyle(probe).color;
+        probe.remove();
+        return normalized;
+    }
+
+    function collectTextNodeSpansInPlainRange(startOffset, endOffset) {
+        const spans = [];
+        const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+            acceptNode(node) {
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    if (node.matches && node.matches('.line-number, .cursor, .cursor-marker, button, textarea, input, select, #textPopup, #findReplaceDialog')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    return node.tagName && node.tagName.toUpperCase() === 'BR'
+                        ? NodeFilter.FILTER_ACCEPT
+                        : NodeFilter.FILTER_SKIP;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        });
+
+        let total = 0;
+        let node = walker.nextNode();
+        while (node && total < endOffset) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                const length = node.textContent.length;
+                const nodeStart = total;
+                const nodeEnd = total + length;
+                if (nodeEnd > startOffset && nodeStart < endOffset) {
+                    spans.push({
+                        node,
+                        startOffset: Math.max(0, startOffset - nodeStart),
+                        endOffset: Math.min(length, endOffset - nodeStart)
+                    });
+                }
+                total = nodeEnd;
+            } else if (node.nodeType === Node.ELEMENT_NODE && node.tagName.toUpperCase() === 'BR') {
+                total += 1;
+            }
+            node = walker.nextNode();
+        }
+        return spans;
+    }
+
+    function replacementValue(replacement, regexArgs) {
+        if (typeof replacement === 'function') {
+            return replacement(...regexArgs);
+        }
+        const match = regexArgs[0] || '';
+        const groups = regexArgs.slice(1, -2);
+        return String(replacement || '').replace(/\$(\$|&|\d{1,2})/g, (token, ref) => {
+            if (ref === '$') return '$';
+            if (ref === '&') return match;
+            const index = Number.parseInt(ref, 10);
+            return groups[index - 1] == null ? '' : groups[index - 1];
+        });
+    }
+
+    function lineBoundsForSubstitution(text, firstLine, lastLine) {
+        const source = String(text || '').replace(/\r\n|\r/g, '\n');
+        if (firstLine == null || firstLine === '') {
+            return { start: 0, end: source.length };
+        }
+        const first = Number.parseInt(firstLine, 10);
+        const last = lastLine == null || lastLine === '' ? first : Number.parseInt(lastLine, 10);
+        if (!Number.isFinite(first) || !Number.isFinite(last) || first < 1 || last < first) {
+            return null;
+        }
+
+        const lines = source.split('\n');
+        if (first > lines.length) {
+            return null;
+        }
+        const safeLast = Math.min(last, lines.length);
+        const start = lines.slice(0, first - 1).reduce((sum, line) => sum + line.length + 1, 0);
+        const end = lines.slice(0, safeLast).reduce((sum, line, index) => {
+            const hasFollowingNewline = index < lines.length - 1;
+            return sum + line.length + (hasFollowingNewline ? 1 : 0);
+        }, 0);
+        return { start, end };
+    }
+
     function escapeRegex(str) {
         return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
@@ -4930,6 +5334,10 @@
         setStatus(`delete_empty_lines: removed ${removed} empty line${removed === 1 ? '' : 's'}.`);
         scheduleSend();
         return removed;
+    }
+
+    function deleteEmptyLines() {
+        return delete_empty_lines();
     }
 
     function lineHtmlIsEmpty(container) {
@@ -5841,6 +6249,17 @@
         setDiffContext,
         clearDiffContext,
         clearAllHighlight,
+        delete_empty_lines,
+        deleteEmptyLines,
+        yankLinesFromCaret,
+        deleteYankLinesFromCaret,
+        yankPasteCurrentLine,
+        pasteClipboardAfterCurrentLine,
+        hl,
+        sub,
+        substitute,
+        fsub,
+        filteredSubstitute,
         renderMarkdown,
         copyMarkdownToClipboard,
         hideCmd,
