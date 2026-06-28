@@ -190,6 +190,10 @@
         clearAllHighlight();
     });
 
+    document.getElementById('clear-formatting').addEventListener('click', () => {
+        clearFormattingInSelection();
+    });
+
     document.getElementById('iconize-images').addEventListener('click', () => {
         replaceImagesInSelectionWithButtons();
     });
@@ -214,6 +218,31 @@
             setStatus(`Clipboard copy failed: ${error.message}`);
         }
     });
+
+    async function copySelectionOuterHtmlToClipboard() {
+        const range = getCurrentEditorSelectionRange();
+        if (!range) {
+            setStatus('F6 copy: no editor selection.');
+            return '';
+        }
+
+        const container = document.createElement('div');
+        container.appendChild(range.cloneContents());
+        const html = container.innerHTML;
+        if (!html) {
+            setStatus('F6 copy: selected editor content has no HTML.');
+            return '';
+        }
+
+        try {
+            await navigator.clipboard.writeText(html);
+            setStatus(`F6 copy: selected HTML source copied (${html.length} chars).`);
+            return html;
+        } catch (error) {
+            setStatus(`F6 copy failed: ${error.message}`);
+            return '';
+        }
+    }
 
     document.getElementById('insert-html').addEventListener('click', () => {
         insertOrConvertHtml();
@@ -332,6 +361,9 @@
         if (event.key === 'Escape' && diffNotesPickState) {
             event.preventDefault();
             cancelDiffNotesMode('diffnotes: note selection cancelled.');
+        } else if (event.key === 'F6') {
+            event.preventDefault();
+            copySelectionOuterHtmlToClipboard();
         } else if (event.key === 'F7') {
             event.preventDefault();
             diffnotes();
@@ -625,6 +657,8 @@
             hl: () => showHighlightPopup(),
             delete_empty_lines: () => delete_empty_lines(),
             deleteEmptyLines: () => deleteEmptyLines(),
+            normalizeEditorDom: () => normalizeEditorDom(),
+            copySelectionOuterHtmlToClipboard: () => copySelectionOuterHtmlToClipboard(),
             block_color: () => block_color(),
             nested_block_color: () => nested_block_color()
         };
@@ -1054,6 +1088,9 @@
             span.style.backgroundColor = color;
             range.surroundContents(span);
         });
+        if (matches.length) {
+            normalizeEditorDom(root, { quiet: true });
+        }
     }
 
     function popupTextSearchNodeFilter(node) {
@@ -1169,6 +1206,22 @@
         if (editor.contains(range.commonAncestorContainer)) {
             savedEditorRange = range.cloneRange();
         }
+    }
+
+    function getCurrentEditorSelectionRange() {
+        const selection = window.getSelection();
+        if (selection && selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            if (!range.collapsed && editor.contains(range.commonAncestorContainer)) {
+                return range.cloneRange();
+            }
+        }
+
+        if (savedEditorRange && !savedEditorRange.collapsed && editor.contains(savedEditorRange.commonAncestorContainer)) {
+            return savedEditorRange.cloneRange();
+        }
+
+        return null;
     }
 
     function getInsertionRange() {
@@ -1296,40 +1349,83 @@
     }
 
     function cursorsAtSelectionLineEdges(edge) {
-        const range = savedEditorRange && savedEditorRange.cloneRange();
+        const range = getCurrentEditorSelectionRange();
         if (!range || range.collapsed || !editor.contains(range.commonAncestorContainer)) {
             setStatus('No selected lines for cursor placement.');
             return;
         }
 
-        const selectedText = extractTextWithLineBreaks(range.cloneContents());
-        if (!selectedText) {
-            setStatus('No selected lines for cursor placement.');
+        const positions = cursorPositionsForRenderedSelectionLines(range, edge);
+        if (!positions.length) {
+            setStatus('No rendered selected lines for cursor placement.');
             return;
         }
-
-        const plain = getPlainTextForIndexing();
-        const start = plainOffsetForRangeStart(range);
-        const end = start + selectedText.replace(/\r\n|\r/g, '\n').length;
-        if (start < 0) {
-            setStatus('Could not map selection to text offsets.');
-            return;
-        }
-
-        const offsets = selectedLineEdgeOffsets(plain, start, end, edge);
 
         clearAllCursors(false);
-        offsets.reverse().forEach(offset => {
-            const position = getTextPositionForPlainOffset(offset);
-            if (position) {
-                const cursorRange = document.createRange();
-                cursorRange.setStart(position.node, position.offset);
-                cursorRange.collapse(true);
-                addCursorAtRange(cursorRange);
-            }
+        positions.reverse().forEach(position => {
+            const cursorRange = document.createRange();
+            cursorRange.setStart(position.node, position.offset);
+            cursorRange.collapse(true);
+            addCursorAtRange(cursorRange);
         });
         setStatus(`Added ${cursors.length} cursor(s) at selected line ${edge}s.`);
         scheduleSend();
+    }
+
+    function cursorPositionsForRenderedSelectionLines(selectionRange, edge = 'start') {
+        const byLine = new Map();
+        const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                const parent = node.parentElement;
+                if (!node.nodeValue || !parent) return NodeFilter.FILTER_REJECT;
+                if (parent.closest('.line-number, .cursor, .cursor-marker, button, textarea, input, select, script, style, #textPopup, #findReplaceDialog')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return selectionRange.intersectsNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+            }
+        });
+
+        let node;
+        while ((node = walker.nextNode())) {
+            collectCursorPositionsForTextNode(selectionRange, node, edge, byLine);
+        }
+
+        return Array.from(byLine.values())
+            .sort((a, b) => a.top - b.top)
+            .map(({ node, offset }) => ({ node, offset }));
+    }
+
+    function collectCursorPositionsForTextNode(selectionRange, node, edge, byLine) {
+        const text = node.nodeValue || '';
+        for (let i = 0; i < text.length; i += 1) {
+            const charRange = document.createRange();
+            charRange.setStart(node, i);
+            charRange.setEnd(node, i + 1);
+            if (!rangesOverlap(selectionRange, charRange)) {
+                continue;
+            }
+
+            Array.from(charRange.getClientRects()).forEach(rect => {
+                if (!rect || (rect.width === 0 && rect.height === 0)) return;
+                const key = Math.round(rect.top);
+                const existing = byLine.get(key);
+                const metric = edge === 'end' ? rect.right : rect.left;
+                const isBetter = !existing || (edge === 'end' ? metric > existing.metric : metric < existing.metric);
+                if (isBetter) {
+                    byLine.set(key, {
+                        top: rect.top,
+                        metric,
+                        node,
+                        offset: edge === 'end' ? i + 1 : i
+                    });
+                }
+            });
+        }
+    }
+
+    function rangesOverlap(a, b) {
+        return a.compareBoundaryPoints(Range.END_TO_START, b) < 0 &&
+            a.compareBoundaryPoints(Range.START_TO_END, b) > 0;
     }
 
     function selectedLineEdgeOffsets(plainText, startOffset, endOffset, edge = 'start') {
@@ -2705,6 +2801,8 @@
                     ['yp, yp(10)', 'Yank current line or next N lines, then paste them after the current line.'],
                     ['clear()', 'Clear temporary highlights.'],
                     ['reflow(60)', 'Rewrap selected text near the requested column.'],
+                    ['copySelectionOuterHtmlToClipboard()', 'Copy the current editor selection as literal UTF-8 HTML source. F6 runs the same command.'],
+                    ['normalizeEditorDom()', 'Lightly clean editor DOM after span-heavy edits without full HTML reparse.'],
                     ['deleteEmptyLines()', 'Delete whitespace-only editor lines. Alias: delete_empty_lines().']
                 ]
             },
@@ -2812,6 +2910,7 @@
             'Ctrl+i            Insert HTML / convert selected literal HTML',
             'Ctrl+m            Insert note',
             'Ctrl+q            Open JS command popup',
+            'F6                Copy selected editor HTML source',
             'F7                Diff two note buttons',
             'Ctrl+l            Record audio into the editor',
             'Ctrl+b            Toggle all toolbars',
@@ -3756,7 +3855,50 @@
         const range = document.createRange();
         range.setStart(start.node, start.offset);
         range.setEnd(end.node, end.offset);
+        if (end.node.nodeType === Node.TEXT_NODE && end.offset === end.node.textContent.length) {
+            extendRangeEndToTrailingLineControls(range, end.node, editor);
+        }
         return range;
+    }
+
+    function getNextNodeAfterSubtree(node, root) {
+        let current = node;
+        while (current && current !== root) {
+            if (current.nextSibling) return current.nextSibling;
+            current = current.parentNode;
+        }
+        return null;
+    }
+
+    function isTrailingLineControlCandidate(node) {
+        if (!node) return false;
+        if (node.nodeType === Node.TEXT_NODE) {
+            return node.nodeValue.trim() === '';
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return false;
+        }
+        if (node.tagName === 'BR') {
+            return false;
+        }
+        if (node.matches && node.matches('.note-button')) {
+            return true;
+        }
+        return node.textContent.trim() === '';
+    }
+
+    function extendRangeEndToTrailingLineControls(range, anchorNode, root) {
+        let endNode = anchorNode;
+        let next = getNextNodeAfterSubtree(anchorNode, root);
+
+        while (next && isTrailingLineControlCandidate(next)) {
+            endNode = next;
+            next = getNextNodeAfterSubtree(next, root);
+        }
+
+        if (endNode && endNode !== anchorNode) {
+            range.setEndAfter(endNode);
+        }
     }
 
     function plainOffsetForRangeStart(range) {
@@ -4672,6 +4814,71 @@
 
     function unwrapElement(element) {
         element.replaceWith(...Array.from(element.childNodes));
+    }
+
+    function clearFormattingElementLooksPresentational(element) {
+        if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+        const tag = element.tagName.toLowerCase();
+        if (tag !== 'span') return true;
+
+        const className = element.className || '';
+        if (/\b(?:highlight|highlight[1-7]|block-color-highlight|popup-overlay-temp-highlight|popup-search-hit|popup-search-current)\b/.test(className)) {
+            return true;
+        }
+
+        const styleText = element.getAttribute('style') || '';
+        if (/(?:background|color|font|text-decoration|text-shadow|letter-spacing|white-space|vertical-align)/i.test(styleText)) {
+            return true;
+        }
+
+        const names = element.getAttributeNames();
+        return names.length === 0 || names.every(name => name === 'class' || name === 'style');
+    }
+
+    function clearFormattingInFragment(fragment) {
+        const selectors = [
+            'span', 'font', 'b', 'strong', 'i', 'em', 'u', 's',
+            'strike', 'mark', 'small', 'big', 'sub', 'sup'
+        ].join(',');
+
+        Array.from(fragment.querySelectorAll(selectors)).reverse().forEach(element => {
+            if (clearFormattingElementLooksPresentational(element)) {
+                unwrapElement(element);
+            }
+        });
+    }
+
+    function clearFormattingInSelection() {
+        const range = getCurrentEditorSelectionRange();
+        if (!range) {
+            setStatus('Select content in the editor before clearing formatting.');
+            return;
+        }
+
+        save();
+        const fragment = range.extractContents();
+        clearFormattingInFragment(fragment);
+
+        const startMarker = document.createTextNode('');
+        const endMarker = document.createTextNode('');
+        fragment.insertBefore(startMarker, fragment.firstChild);
+        fragment.appendChild(endMarker);
+        range.insertNode(fragment);
+
+        const restored = document.createRange();
+        restored.setStartAfter(startMarker);
+        restored.setEndBefore(endMarker);
+        startMarker.remove();
+        endMarker.remove();
+
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(restored);
+        savedEditorRange = restored.cloneRange();
+
+        normalizeEditorDom(editor, { quiet: true });
+        setStatus('Cleared formatting from selection.');
+        scheduleSend();
     }
 
     function matchAndHighlightBrackets() {
@@ -5892,6 +6099,67 @@
         scheduleSend();
     }
 
+    function normalizeEditorDom(root = editor, opts = {}) {
+        if (!root) return { removedEmptySpans: 0, unwrappedPlainSpans: 0, mergedSpans: 0 };
+
+        const stats = { removedEmptySpans: 0, unwrappedPlainSpans: 0, mergedSpans: 0 };
+        const isInertPlainSpan = span =>
+            span.tagName === 'SPAN' &&
+            span.attributes.length === 0;
+        const isMergeableSpan = span =>
+            span.tagName === 'SPAN' &&
+            !span.id &&
+            !span.getAttributeNames().some(name => name.startsWith('data-') || name.startsWith('on')) &&
+            span.getAttributeNames().every(name => name === 'class' || name === 'style');
+        const sameSpanPresentation = (a, b) =>
+            a.className === b.className &&
+            (a.getAttribute('style') || '') === (b.getAttribute('style') || '');
+
+        root.normalize();
+
+        root.querySelectorAll('span').forEach(span => {
+            if (!span.parentNode) return;
+            if (isInertPlainSpan(span)) {
+                if (span.childNodes.length === 0) {
+                    span.remove();
+                    stats.removedEmptySpans++;
+                } else {
+                    span.replaceWith(...span.childNodes);
+                    stats.unwrappedPlainSpans++;
+                }
+            }
+        });
+
+        root.normalize();
+
+        Array.from(root.querySelectorAll('span')).reverse().forEach(span => {
+            if (!span.parentNode || !isMergeableSpan(span)) return;
+
+            let next = span.nextSibling;
+            while (next && next.nodeType === Node.TEXT_NODE && next.nodeValue === '') {
+                const empty = next;
+                next = next.nextSibling;
+                empty.remove();
+            }
+
+            if (next && next.nodeType === Node.ELEMENT_NODE && isMergeableSpan(next) && sameSpanPresentation(span, next)) {
+                while (next.firstChild) {
+                    span.appendChild(next.firstChild);
+                }
+                next.remove();
+                stats.mergedSpans++;
+            }
+        });
+
+        root.normalize();
+
+        if (!opts.quiet) {
+            setStatus(`Normalized editor DOM: removed ${stats.removedEmptySpans} empty span(s), unwrapped ${stats.unwrappedPlainSpans}, merged ${stats.mergedSpans}.`);
+            scheduleSend();
+        }
+        return stats;
+    }
+
     function removeSpansWithClass(className) {
         const spans = Array.from(editor.querySelectorAll(`span.${CSS.escape(String(className || ''))}`));
         spans.forEach(span => {
@@ -6459,8 +6727,8 @@
         return `edz${id}`;
     }
 
-    function handleEditorDoubleClick() {
-        const word = getSelectedTextInsideEditor().trim();
+    function handleEditorDoubleClick(event) {
+        const word = getDoubleClickHighlightText(event);
         if (!word) {
             return;
         }
@@ -6470,6 +6738,80 @@
             setStatus(`${count} occurrence${count === 1 ? '' : 's'} highlighted for "${word}"`);
             scheduleSend();
         }
+    }
+
+    function getDoubleClickHighlightText(event) {
+        const selected = getSelectedTextInsideEditor().trim();
+        const multiwordMode = document.getElementById('doubleClickMultiwordMode')?.checked;
+        const punctuationTokenMode = document.getElementById('doubleClickPunctuationTokenMode')?.checked;
+        const hyphenatedMode = document.getElementById('doubleClickHyphenatedMode')?.checked;
+        if (!multiwordMode && !punctuationTokenMode && !hyphenatedMode) {
+            return selected;
+        }
+
+        const selection = window.getSelection();
+        const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+        const textNode = getTextNodeForDoubleClickRange(range, event);
+        if (!textNode) {
+            return selected;
+        }
+
+        const offset = getDoubleClickTextOffset(textNode, range);
+        let expanded = '';
+        if (multiwordMode) {
+            expanded = getTokenSequenceAtTextOffset(textNode.nodeValue || '', offset, 'phrase');
+        } else if (punctuationTokenMode) {
+            expanded = getTokenSequenceAtTextOffset(textNode.nodeValue || '', offset, 'punctuation');
+        } else {
+            expanded = getTokenSequenceAtTextOffset(textNode.nodeValue || '', offset, 'hyphen');
+        }
+        return expanded || selected;
+    }
+
+    function getTextNodeForDoubleClickRange(range, event) {
+        if (range) {
+            if (range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE) {
+                return range.startContainer;
+            }
+            if (range.commonAncestorContainer && range.commonAncestorContainer.nodeType === Node.TEXT_NODE) {
+                return range.commonAncestorContainer;
+            }
+        }
+        if (event?.target?.nodeType === Node.TEXT_NODE) {
+            return event.target;
+        }
+        if (event?.target) {
+            const walker = document.createTreeWalker(event.target, NodeFilter.SHOW_TEXT);
+            return walker.nextNode();
+        }
+        return null;
+    }
+
+    function getDoubleClickTextOffset(textNode, range) {
+        if (!range) return 0;
+        if (range.startContainer === textNode) return range.startOffset;
+        if (range.endContainer === textNode) return Math.max(0, range.endOffset - 1);
+        return 0;
+    }
+
+    function getTokenSequenceAtTextOffset(text, offset, mode) {
+        const source = String(text || '');
+        if (!source) return '';
+        const safeOffset = Math.max(0, Math.min(offset, Math.max(0, source.length - 1)));
+        const tokenPattern = mode === 'phrase'
+            ? /[A-Za-z0-9_]+(?:[ -]+[A-Za-z0-9_]+)*/g
+            : mode === 'punctuation'
+                ? /[A-Za-z0-9_]+(?:[-.,/:+*&]+[A-Za-z0-9_]+)*/g
+                : /[A-Za-z0-9_]+(?:-+[A-Za-z0-9_]+)*/g;
+        let match;
+        while ((match = tokenPattern.exec(source)) !== null) {
+            const start = match.index;
+            const end = start + match[0].length;
+            if (safeOffset >= start && safeOffset <= end) {
+                return match[0].trim();
+            }
+        }
+        return '';
     }
 
     function highlightRegexRobust(pattern, colid, showResultsListing) {
@@ -6496,6 +6838,9 @@
         }
 
         matches.reverse().forEach(match => wrapTextRange(match.node, match.start, match.end, color));
+        if (matches.length) {
+            normalizeEditorDom(editor, { quiet: true });
+        }
         return matches.length;
     }
 
@@ -6555,6 +6900,14 @@
             node = walker.nextNode();
         }
 
+        matches.sort((a, b) => {
+            if (a.node === b.node) return a.start - b.start;
+            const position = a.node.compareDocumentPosition(b.node);
+            if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+            if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+            return 0;
+        });
+
         const shouldShowResults = document.getElementById('showSearchResults')?.checked && Number(colid) >= 1 && Number(colid) <= 7;
         if (shouldShowResults) {
             prepareSearchResults(source, colid, matches);
@@ -6570,6 +6923,10 @@
                 span.setAttribute('data-spectral-search-result', '1');
             }
         });
+
+        if (matches.length) {
+            normalizeEditorDom(editor, { quiet: true });
+        }
 
         if (shouldShowResults) {
             showSearchResults(matches);
@@ -7255,6 +7612,8 @@
         setDiffContext,
         clearDiffContext,
         clearAllHighlight,
+        clearFormattingInSelection,
+        normalizeEditorDom,
         delete_empty_lines,
         deleteEmptyLines,
         yankLinesFromCaret,
@@ -7268,6 +7627,7 @@
         filteredSubstitute,
         renderMarkdown,
         copyMarkdownToClipboard,
+        copySelectionOuterHtmlToClipboard,
         hideCmd,
         cmdhelp,
         showTextPopup,

@@ -360,6 +360,15 @@ class SpectralWebEditorProvider {
   <main class="shell">
     <div class="toolbars" id="top_toolbars" style="display: none;">
       <div class="toolbar" role="toolbar" aria-label="Spectral Web formatting toolbar">
+        <details class="toolbar-menu">
+          <summary title="Search options">Options</summary>
+          <div class="toolbar-menu-panel">
+            <label><input type="checkbox" id="showSearchResults" title="Show listing of search results"> Show search results</label>
+            <label><input type="checkbox" id="doubleClickMultiwordMode" title="Double-click highlights adjacent space-separated tokens"> Double-click phrase tokens</label>
+            <label><input type="checkbox" id="doubleClickPunctuationTokenMode" title="Double-click highlights tokens joined by punctuation separators"> Double-click punctuation tokens</label>
+            <label><input type="checkbox" id="doubleClickHyphenatedMode" title="Double-click highlights a full hyphenated token"> Double-click hyphenated tokens</label>
+          </div>
+        </details>
         <button type="button" data-command="bold" id="boldButton" title="Boldface the selection">B</button>
         <button type="button" data-command="italic" id="italicsButton" title="Italicize the selection">I</button>
         <button type="button" data-command="underline" id="underlineButton" title="Underline the selection">U</button>
@@ -371,7 +380,7 @@ class SpectralWebEditorProvider {
         <button type="button" id="set-target" title="Set target">Target</button>
         <button type="button" id="link-target" title="Create link to target">Link</button>
         <button type="button" id="external-link" title="Create external link">Ext Link</button>
-        <button type="button" data-command="removeFormat" title="Clear highlighting/formatting from selection">Clear Formatting</button>
+        <button type="button" id="clear-formatting" title="Clear highlighting/formatting from selection">Clear Formatting</button>
         <button type="button" id="clear-highlights" title="Clear temporary highlighting">Clear Highlights</button>
         <button type="button" id="iconize-images" title="Replace selected images with reveal buttons">Iconize Images</button>
         <button type="button" id="scale-images" title="Scale selected or nearest image by percent">Scale Images</button>
@@ -446,7 +455,6 @@ class SpectralWebEditorProvider {
         <input type="text" id="searchBox7" data-search-colid="7" placeholder="Enter regex, press enter">
         <button type="button" data-highlight="#ffffff" data-colid="7" id="hlButton7" class="hlButton" title="Highlight 7">H</button>
         <button type="button" id="multi-regex-highlight" title="Highlight multiple regexes">H*</button>
-        <label><input type="checkbox" id="showSearchResults" title="Show listing of search results"> Results</label>
       </div>
       <div class="toolbar" id="statusBar">
         <textarea id="statusText" rows="2" readonly></textarea>

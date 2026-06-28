@@ -76,6 +76,58 @@ label {
     white-space: nowrap;
 }
 
+.toolbar-menu {
+    position: relative;
+    display: inline-block;
+}
+
+.toolbar-menu > summary {
+    list-style: none;
+    box-sizing: border-box;
+    min-width: 30px;
+    height: 28px;
+    padding: 4px 8px;
+    border: 1px solid var(--vscode-button-border, #aaaaaa);
+    background: var(--vscode-button-secondaryBackground, #eeeeee);
+    color: var(--vscode-button-secondaryForeground, #111111);
+    cursor: pointer;
+    user-select: none;
+}
+
+.toolbar-menu > summary::-webkit-details-marker {
+    display: none;
+}
+
+.toolbar-menu > summary::after {
+    content: " v";
+    font-size: 0.85em;
+}
+
+.toolbar-menu[open] > summary::after {
+    content: " ^";
+}
+
+.toolbar-menu-panel {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 2px);
+    z-index: 1000;
+    min-width: 190px;
+    max-width: calc(100vw - 16px);
+    padding: 7px 9px;
+    border: 1px solid var(--vscode-panel-border, #cccccc);
+    background: var(--vscode-editor-background, #ffffff);
+    color: var(--vscode-editor-foreground, #111111);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+.toolbar-menu-panel label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+
 #boldButton {
     font-weight: bold;
 }
