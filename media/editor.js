@@ -619,6 +619,36 @@
         return '';
     }
 
+    function scrollEditorToEdge(edge) {
+        if (edge === 'bottom') {
+            const marker = document.createElement('span');
+            marker.style.cssText = 'display:inline-block;width:1px;height:1px;overflow:hidden;';
+            marker.setAttribute('data-spectral-scroll-marker', 'true');
+            editor.appendChild(marker);
+            editor.scrollTop = editor.scrollHeight;
+            marker.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'auto' });
+            marker.remove();
+            editor.scrollTop = editor.scrollHeight;
+            setStatus('Scrolled to editor bottom.');
+            return '';
+        }
+
+        editor.scrollTop = 0;
+        editor.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'auto' });
+        const scroller = document.scrollingElement || document.documentElement;
+        if (scroller) scroller.scrollTop = Math.min(scroller.scrollTop, editor.offsetTop);
+        setStatus('Scrolled to editor top.');
+        return '';
+    }
+
+    function scrollToBottom() {
+        return scrollEditorToEdge('bottom');
+    }
+
+    function scrollToTop() {
+        return scrollEditorToEdge('top');
+    }
+
     async function evaluateJsCommand(command) {
         const normalizedCommand = command.replace(/\(\s*\)$/, '');
         const lineShortcut = parseLineCommand(command);
@@ -659,6 +689,8 @@
             deleteEmptyLines: () => deleteEmptyLines(),
             normalizeEditorDom: () => normalizeEditorDom(),
             copySelectionOuterHtmlToClipboard: () => copySelectionOuterHtmlToClipboard(),
+            scrollToBottom: () => scrollToBottom(),
+            scrollToTop: () => scrollToTop(),
             block_color: () => block_color(),
             nested_block_color: () => nested_block_color()
         };
@@ -2794,6 +2826,8 @@
                 commands: [
                     ['cmdhelp()', 'Show this command reference.'],
                     ['hideCmd()', 'Hide the bottom JS command bar.'],
+                    ['scrollToTop()', 'Scroll the editor view to the top of the content.'],
+                    ['scrollToBottom()', 'Scroll the editor view to the bottom of the content.'],
                     ['Spectral.commandNames()', 'List plugin commands registered with Spectral.registerCommand().'],
                     ['yy, yy(10)', 'Yank/copy the current line or next N lines. Older form 10y also works.'],
                     ['dd, dd(10)', 'Delete and yank the current line or next N lines. Older form 10d also works.'],
@@ -7629,6 +7663,8 @@
         copyMarkdownToClipboard,
         copySelectionOuterHtmlToClipboard,
         hideCmd,
+        scrollToBottom,
+        scrollToTop,
         cmdhelp,
         showTextPopup,
         showInputDialog,
