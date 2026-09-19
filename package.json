@@ -41,7 +41,7 @@
     ]
   },
   "scripts": {
-    "lint": "node --check extension.js && node --check media/editor.js && node --check lib/spectralwebCore.js && node --check test/run-tests.js",
+    "lint": "node --check extension.js && node --check media/editor.js && node --check lib/spectralwebCore.js && node --check cmd_client.js && node --check plugins/plugin_append_stamp.js && node --check plugins/plugin_cmd_server.js && node --check plugins/plugin_plantuml.js && node --check test/run-tests.js",
     "test": "node test/run-tests.js"
   },
   "devDependencies": {}

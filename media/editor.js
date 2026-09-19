@@ -55,6 +55,7 @@
     const pendingSvgFileReads = new Map();
     const pendingFileContentReads = new Map();
     const pendingPlantUmlRenders = new Map();
+    const pendingCmdServerControls = new Map();
     let jsCommandHistoryIndex = -1;
 
     editor.innerHTML = initialState.initialEditorHtml || '';
@@ -499,6 +500,10 @@
             handleFileContentReadResult(message);
         } else if (message.type === 'plantUmlSvgResult') {
             handlePlantUmlSvgResult(message);
+        } else if (message.type === 'cmdServerControlResult') {
+            handleCmdServerControlResult(message);
+        } else if (message.type === 'cmdServerCommand') {
+            executeCmdServerCommand(message);
         }
     });
 
@@ -1402,6 +1407,52 @@
         });
         setStatus(`Added ${cursors.length} cursor(s) at selected line ${edge}s.`);
         scheduleSend();
+    }
+
+    function requestCmdServerControl(action, port) {
+        const numericPort = Number(port);
+        if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
+            return Promise.reject(new Error('Port must be an integer from 1 to 65535.'));
+        }
+        const requestId = `cmd-server-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        return new Promise((resolve, reject) => {
+            pendingCmdServerControls.set(requestId, { resolve, reject });
+            vscode.postMessage({ type: `${action}CmdServer`, requestId, port: numericPort });
+        });
+    }
+
+    function handleCmdServerControlResult(message) {
+        const pending = pendingCmdServerControls.get(message.requestId);
+        if (!pending) return;
+        pendingCmdServerControls.delete(message.requestId);
+        if (message.ok) pending.resolve(message.port);
+        else pending.reject(new Error(message.error || 'Command server operation failed.'));
+    }
+
+    async function executeCmdServerCommand(message) {
+        try {
+            const result = await evaluateJsCommand(String(message.command || ''));
+            scheduleSend();
+            vscode.postMessage({
+                type: 'cmdServerEvalResult', requestId: message.requestId, ok: true,
+                result: formatCmdServerResult(result)
+            });
+        } catch (error) {
+            vscode.postMessage({
+                type: 'cmdServerEvalResult', requestId: message.requestId, ok: false,
+                error: error && error.message ? error.message : String(error)
+            });
+        }
+    }
+
+    function formatCmdServerResult(result) {
+        if (result === undefined) return 'undefined';
+        if (typeof result === 'string') return result;
+        try {
+            return JSON.stringify(result);
+        } catch {
+            return String(result);
+        }
     }
 
     function cursorPositionsForRenderedSelectionLines(selectionRange, edge = 'start') {
@@ -7636,6 +7687,8 @@
         insertSvgFile,
         readFileContent,
         renderPlantUmlSvg,
+        startCmdServer: port => requestCmdServerControl('start', port),
+        stopCmdServer: port => requestCmdServerControl('stop', port),
         moveSvg,
         createNote,
         addCursorAtIndex,

@@ -1,5 +1,6 @@
 const vscode = require('vscode');
 const fs = require('fs');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
@@ -44,6 +45,8 @@ class SpectralWebEditorProvider {
         this.panelsByDocument = new Map();
         this.stateByDocument = new Map();
         this.applyingEdit = new Set();
+        this.commandServers = new Map();
+        this.pendingCommandExecutions = new Map();
     }
 
     async resolveCustomTextEditor(document, webviewPanel) {
@@ -102,6 +105,21 @@ class SpectralWebEditorProvider {
                 return;
             }
 
+            if (message.type === 'startCmdServer') {
+                await this.handleStartCmdServer(webviewPanel.webview, document, message);
+                return;
+            }
+
+            if (message.type === 'stopCmdServer') {
+                await this.handleStopCmdServer(webviewPanel.webview, document, message);
+                return;
+            }
+
+            if (message.type === 'cmdServerEvalResult') {
+                this.handleCmdServerEvalResult(message);
+                return;
+            }
+
         });
 
         const changeSubscription = vscode.workspace.onDidChangeTextDocument((event) => {
@@ -115,6 +133,7 @@ class SpectralWebEditorProvider {
         });
 
         webviewPanel.onDidDispose(() => {
+            this.stopCommandServersForDocument(key);
             this.panelsByDocument.delete(key);
             changeSubscription.dispose();
         });
@@ -266,6 +285,162 @@ class SpectralWebEditorProvider {
                 ok: false,
                 error: error && error.message ? error.message : String(error)
             });
+        }
+    }
+
+    async handleStartCmdServer(webview, document, message) {
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        const port = Number(message.port);
+        try {
+            if (!Number.isInteger(port) || port < 1 || port > 65535) {
+                throw new Error('Port must be an integer from 1 to 65535.');
+            }
+            const documentKey = document.uri.toString();
+            const serverKey = `${documentKey}\n${port}`;
+            if (this.commandServers.has(serverKey)) {
+                throw new Error(`Command server is already listening on port ${port}.`);
+            }
+
+            const server = net.createServer(socket => this.handleCommandSocket(webview, serverKey, socket));
+            const entry = { server, documentKey, port, sockets: new Set() };
+            this.commandServers.set(serverKey, entry);
+            try {
+                await new Promise((resolve, reject) => {
+                    const onError = error => {
+                        server.off('listening', onListening);
+                        reject(error);
+                    };
+                    const onListening = () => {
+                        server.off('error', onError);
+                        resolve();
+                    };
+                    server.once('error', onError);
+                    server.once('listening', onListening);
+                    server.listen({ host: '127.0.0.1', port, exclusive: true });
+                });
+            } catch (error) {
+                this.commandServers.delete(serverKey);
+                throw error;
+            }
+            server.on('error', error => {
+                vscode.window.showErrorMessage(`Spectral command server error on port ${port}: ${error.message}`);
+            });
+            await webview.postMessage({ type: 'cmdServerControlResult', requestId, ok: true, action: 'start', port });
+        } catch (error) {
+            await webview.postMessage({
+                type: 'cmdServerControlResult', requestId, ok: false, action: 'start', port,
+                error: error && error.message ? error.message : String(error)
+            });
+        }
+    }
+
+    async handleStopCmdServer(webview, document, message) {
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        const port = Number(message.port);
+        try {
+            if (!Number.isInteger(port) || port < 1 || port > 65535) {
+                throw new Error('Port must be an integer from 1 to 65535.');
+            }
+            const serverKey = `${document.uri.toString()}\n${port}`;
+            const entry = this.commandServers.get(serverKey);
+            if (!entry) {
+                throw new Error(`No command server is listening on port ${port} for this editor.`);
+            }
+            await this.closeCommandServer(serverKey, entry);
+            await webview.postMessage({ type: 'cmdServerControlResult', requestId, ok: true, action: 'stop', port });
+        } catch (error) {
+            await webview.postMessage({
+                type: 'cmdServerControlResult', requestId, ok: false, action: 'stop', port,
+                error: error && error.message ? error.message : String(error)
+            });
+        }
+    }
+
+    handleCommandSocket(webview, serverKey, socket) {
+        const entry = this.commandServers.get(serverKey);
+        if (!entry) {
+            socket.destroy();
+            return;
+        }
+        entry.sockets.add(socket);
+        socket.setEncoding('utf8');
+        socket.spectralCommandQueue = [];
+        socket.spectralCommandBusy = false;
+        let buffer = '';
+        socket.on('data', chunk => {
+            buffer += chunk;
+            if (Buffer.byteLength(buffer, 'utf8') > 1024 * 1024) {
+                socket.end('Error: command exceeds 1 MiB\0');
+                return;
+            }
+            let delimiter;
+            while ((delimiter = buffer.indexOf('\0')) !== -1) {
+                const command = buffer.slice(0, delimiter);
+                buffer = buffer.slice(delimiter + 1);
+                if (!command.trim()) {
+                    socket.write('Error: empty command\0');
+                    continue;
+                }
+                socket.spectralCommandQueue.push(command);
+            }
+            this.dispatchNextSocketCommand(webview, serverKey, socket);
+        });
+        socket.on('close', () => {
+            entry.sockets.delete(socket);
+            for (const [requestId, pending] of this.pendingCommandExecutions) {
+                if (pending.socket === socket) this.pendingCommandExecutions.delete(requestId);
+            }
+        });
+        socket.on('error', () => {});
+    }
+
+    dispatchNextSocketCommand(webview, serverKey, socket) {
+        if (socket.destroyed || socket.spectralCommandBusy || !socket.spectralCommandQueue.length) return;
+        const command = socket.spectralCommandQueue.shift();
+        const requestId = getNonce();
+        socket.spectralCommandBusy = true;
+        this.pendingCommandExecutions.set(requestId, { socket, serverKey, webview });
+        webview.postMessage({ type: 'cmdServerCommand', requestId, command }).then(delivered => {
+            if (!delivered) this.failPendingCommand(requestId, 'Webview is not available.');
+        });
+    }
+
+    handleCmdServerEvalResult(message) {
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        const pending = this.pendingCommandExecutions.get(requestId);
+        if (!pending) return;
+        this.pendingCommandExecutions.delete(requestId);
+        if (pending.socket.destroyed) return;
+        const prefix = message.ok ? 'Result: ' : 'Error: ';
+        const value = message.ok ? message.result : message.error;
+        pending.socket.write(`${prefix}${String(value == null ? '' : value)}\0`);
+        pending.socket.spectralCommandBusy = false;
+        this.dispatchNextSocketCommand(pending.webview, pending.serverKey, pending.socket);
+    }
+
+    failPendingCommand(requestId, error) {
+        const pending = this.pendingCommandExecutions.get(requestId);
+        if (!pending) return;
+        this.pendingCommandExecutions.delete(requestId);
+        if (!pending.socket.destroyed) {
+            pending.socket.write(`Error: ${error}\0`);
+            pending.socket.spectralCommandBusy = false;
+            this.dispatchNextSocketCommand(pending.webview, pending.serverKey, pending.socket);
+        }
+    }
+
+    async closeCommandServer(serverKey, entry) {
+        this.commandServers.delete(serverKey);
+        for (const socket of entry.sockets) socket.destroy();
+        for (const [requestId, pending] of this.pendingCommandExecutions) {
+            if (pending.serverKey === serverKey) this.pendingCommandExecutions.delete(requestId);
+        }
+        await new Promise(resolve => entry.server.close(resolve));
+    }
+
+    stopCommandServersForDocument(documentKey) {
+        for (const [serverKey, entry] of this.commandServers) {
+            if (entry.documentKey === documentKey) this.closeCommandServer(serverKey, entry).catch(() => {});
         }
     }
 
