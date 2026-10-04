@@ -15,6 +15,52 @@ Added a webview-to-extension-host bridge for the command server plugin.
 - Closing the editor stops its listeners and connected sockets.
 - Input is limited to 1 MiB per buffered command.
 
+## 2026-06-22: Light DOM Normalization Helper
+
+Kept the webview in step with `spectralMultiCursor.html` for `normalizeEditorDom()`.
+
+- Merges adjacent text nodes using DOM `normalize()`.
+- Removes empty inert spans, unwraps attribute-free spans, and merges adjacent spans with identical simple `class`/`style` presentation.
+- Leaves full `sanitizeHtml()` as the heavier explicit reparse/export-style cleanup.
+- Search and double-click occurrence highlight paths now call `normalizeEditorDom(..., { quiet: true })` after they insert spans, matching the standalone editor.
+
+## 2026-06-22: YP Trailing Note Buttons
+
+Kept the webview in step with `spectralMultiCursor.html` for yanking line ranges with trailing inline controls.
+
+- `yy`/`yp` style line ranges now extend past trailing empty inline controls such as `.note-button` before the line break.
+- The extension stops at `<br>` or real text, so it does not pull in the next line.
+
+## 2026-06-26: Search Options Dropdown
+
+Kept the webview in step with `spectralMultiCursor.html` for a compact toolbar menu experiment.
+
+- Replaced the inline search-results checkbox with an `Options` dropdown in the regex highlighter toolbar.
+- Kept the checkbox id as `showSearchResults`, so existing search result popup logic is unchanged.
+- Moved the dropdown to the leading toolbar area and made the panel open rightward, avoiding left-edge overflow when the menu button wraps to the start of a row.
+
+## 2026-06-27: Search Result Listing Order
+
+Kept the webview in step with `spectralMultiCursor.html` for search result ordering.
+
+- Standalone search now builds the result listing in forward document order before applying highlight spans in reverse DOM order.
+- Webview search now explicitly sorts matches by DOM position before assigning result ids and building the result popup.
+
+## 2026-06-27: Double-Click Token Options
+
+Kept the webview in step with `spectralMultiCursor.html` for relevant Tcl-style option menu behavior.
+
+- Added `Double-click phrase tokens` and `Double-click hyphenated tokens` checkboxes to the compact `Options` dropdown.
+- Double-click highlighting now expands from the clicked text node according to those options, with phrase-token mode taking precedence over hyphenated-token mode.
+- Added `Double-click punctuation tokens`, expanding across `- . , / : + * &` separators when enabled.
+
+## 2026-06-22: F6 Selection HTML Source Copy
+
+Kept the webview in step with `spectralMultiCursor.html` for the new F6 command:
+
+- F6 copies the current editor selection as literal UTF-8 HTML source text, so pasted clipboard text shows the tags.
+- `copySelectionOuterHtmlToClipboard()` is available from JS Cmd and `window.Spectral`.
+
 ## 2026-06-22: Webview Plugin Loader
 
 Added a Tcl-style webview plugin loader for extension-local scripts:

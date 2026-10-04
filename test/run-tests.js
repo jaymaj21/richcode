@@ -321,6 +321,8 @@ test('markdownToHtml renders common Spectral markdown structures', () => {
     ].join('\n'));
 });
 
+require('./note-search-tests')(test);
+
 let failures = 0;
 tests.forEach(({ name, fn }) => {
     try {

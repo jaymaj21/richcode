@@ -2895,6 +2895,8 @@
                 title: 'Notes',
                 commands: [
                     ['createNote("3.7", "note text")', 'Create a note button at a line.character, line.end, or end index.'],
+                    ['searchnotes("text", { showResults: true })', 'Search across embedded notes; click a result to jump to its note. Strings are case-insensitive by default.'],
+                    ['searchnotes(/error|fail/i)', 'Search notes with a RegExp. Options: regex, caseSensitive, showResults, colid, color.'],
                     ['diffnotes()', 'Click two note buttons and compare their contents. F7 starts the same mode.'],
                     ['diffnotes({ granularity: "word" })', 'Compare notes by word; use "line", "word", or "char".'],
                     ['setDiffContext(2, 2)', 'Show changed lines plus context in line note diffs.'],
@@ -5401,7 +5403,7 @@
         button.type = 'button';
         button.className = 'note-button';
         button.setAttribute('data-message', encodedMessage);
-        button.textContent = label || '';
+        button.textContent = 'N';
         button.addEventListener('click', noteButtonClickHandler);
         return button;
     }
@@ -5412,6 +5414,108 @@
 
     function getNoteButtonFromTarget(target) {
         return target && target.closest ? target.closest('.note-button') : null;
+    }
+
+    function noteSearchRegex(searchValue, opts = {}) {
+        if (searchValue instanceof RegExp) {
+            return new RegExp(searchValue.source, searchValue.flags.includes('g') ? searchValue.flags : searchValue.flags + 'g');
+        }
+        const text = String(searchValue ?? '');
+        return new RegExp(opts.regex === true ? text : escapeRegex(text), 'g' + (opts.caseSensitive === true ? '' : 'i'));
+    }
+
+    function noteMatchSnippet(text, index, length, context = 45) {
+        const start = Math.max(0, index - context);
+        const end = Math.min(text.length, index + length + context);
+        return (start > 0 ? '...' : '') + text.slice(start, end).replace(/\s+/g, ' ') + (end < text.length ? '...' : '');
+    }
+
+    function collectEmbeddedNotes(root = editor) {
+        return Array.from(root.querySelectorAll('button.note-button, button[data-message], button[onclick*="showText"]'))
+            .map(btn => {
+                const legacy = (btn.getAttribute('onclick') || '').match(/showText\s*\(\s*([`'"])([\s\S]*?)\1/);
+                const text = base64DecodeUtf8(btn.getAttribute('data-message') || (legacy ? legacy[2] : ''));
+                return { btn, text };
+            }).filter(note => note.text !== '');
+    }
+
+    function searchnotes(searchValue, opts = {}) {
+        if (searchValue == null || String(searchValue).length === 0) {
+            setStatus('searchnotes: provide a search string or RegExp.');
+            return [];
+        }
+        let regex;
+        try {
+            regex = noteSearchRegex(searchValue, opts);
+        } catch (error) {
+            setStatus(`searchnotes: invalid pattern: ${error.message}`);
+            return [];
+        }
+        const notes = collectEmbeddedNotes();
+        const matches = [];
+        const colid = Math.max(1, Math.min(7, parseInt(opts.colid || 1, 10) || 1));
+        let changed = false;
+        notes.forEach((note, noteIndex) => {
+            regex.lastIndex = 0;
+            let match;
+            let localCount = 0;
+            while ((match = regex.exec(note.text)) !== null) {
+                localCount++;
+                matches.push({
+                    button: note.btn, noteIndex, matchIndex: match.index,
+                    matchText: match[0], noteText: note.text,
+                    snippet: noteMatchSnippet(note.text, match.index, match[0].length)
+                });
+                // Advance by a full code point for Unicode zero-width matches.
+                if (match[0] === '') {
+                    const code = note.text.codePointAt(regex.lastIndex);
+                    regex.lastIndex += (regex.unicode || regex.unicodeSets) && code > 0xffff ? 2 : 1;
+                }
+            }
+            if (localCount && opts.color) {
+                note.btn.style.backgroundColor = opts.color;
+                note.btn.style.borderColor = opts.color;
+                changed = true;
+            }
+        });
+        if (opts.showResults ?? document.getElementById('showSearchResults')?.checked) {
+            ensureSearchResultsPopup();
+            searchResultsTitle.textContent = `Note Search Results ${colid}: ${matches.length} match(es)`;
+            searchResultsList.textContent = '';
+            matches.forEach((match, index) => {
+                const row = document.createElement('button');
+                row.type = 'button';
+                row.className = 'search-result-row';
+                const number = document.createElement('span');
+                number.className = 'search-result-number';
+                number.textContent = String(index + 1);
+                const snippet = document.createElement('span');
+                snippet.className = 'search-result-snippet';
+                snippet.textContent = `note ${match.noteIndex + 1}: ${match.snippet}`;
+                row.appendChild(number);
+                row.appendChild(snippet);
+                row.addEventListener('click', () => {
+                    if (!editor.contains(match.button)) {
+                        setStatus('Note search result is no longer available.');
+                        return;
+                    }
+                    const range = document.createRange();
+                    range.selectNode(match.button);
+                    const selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    savedEditorRange = range.cloneRange();
+                    match.button.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    editor.focus();
+                    setStatus(`Selected note ${match.noteIndex + 1}.`);
+                });
+                searchResultsList.appendChild(row);
+            });
+            showSearchResults(matches);
+        }
+        if (changed) scheduleSend();
+        setStatus(`searchnotes: ${matches.length} match(es) in ${notes.length} note(s).`);
+        return matches;
     }
 
     function getDiffNoteText(noteRef) {
@@ -6679,6 +6783,7 @@
 
     function hydrateEditorControls(root) {
         root.querySelectorAll('.note-button').forEach(button => {
+            button.textContent = 'N';
             button.removeEventListener('click', noteButtonClickHandler);
             button.addEventListener('click', noteButtonClickHandler);
         });
@@ -7696,6 +7801,7 @@
         block_color,
         nested_block_color,
         diffnotes,
+        searchnotes,
         setDiffContext,
         clearDiffContext,
         clearAllHighlight,
